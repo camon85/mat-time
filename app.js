@@ -37,6 +37,13 @@ function nextOf(belt, stripe) {
   return stripe < MAX_STRIPE ? { belt, stripe: stripe + 1 } : { belt: belt + 1, stripe: 0 };
 }
 
+/** 한글 조사 이/가 선택 — 받침 유무로 갈린다 ("그랄이" vs "블랙벨트가") */
+function subjectParticle(word) {
+  const c = word.charCodeAt(word.length - 1);
+  const hangul = c >= 0xac00 && c <= 0xd7a3;
+  return hangul && (c - 0xac00) % 28 !== 0 ? "이" : "가";
+}
+
 function labelOf(belt, stripe) {
   if (belt >= BLACK) return "블랙벨트";
   return BELTS[belt].name + " " + stripe + "그랄";
@@ -90,17 +97,26 @@ function monthsElapsed(from, to) {
 
 const STORE_KEY = "bjj-attendance";
 
+/*
+ * 현재 벨트·그랄·단계 시작일은 따로 저장하지 않는다. 승급 이력(history)의
+ * 마지막 항목에서 파생한다 — "단계 시작일"과 "승급일"이 같은 사실이기 때문.
+ */
 let state = {
-  belt: 0,
-  stripe: 0,
   startedAt: "",        // 주짓수를 처음 시작한 날. 비어 있으면 미설정
-  promotedAt: key(today()),
   attendance: [],       // "YYYY-MM-DD" 배열 (정렬·중복 제거 유지)
-  history: [],          // { date, belt, stripe } — 승급 이력
-  updatedAt: ""         // ISO 문자열. 병합 시 스칼라 필드의 승자를 정하는 기준
+  removed: {},          // 출석을 취소한 날짜 → 취소 시각(ISO). 다시 체크하면 키 삭제
+  history: [],          // { date, belt, stripe } — 승급 이력. 날짜 오름차순
+  updatedAt: ""         // ISO 문자열. 병합 시 승자 판정 기준
 };
 
 let calCursor = today();   // 캘린더가 보고 있는 달
+
+/** 현재 벨트·그랄과 그 단계가 시작된 날. 이력이 비면 화이트 0그랄 */
+function currentRank() {
+  const last = state.history[state.history.length - 1];
+  if (!last) return { belt: 0, stripe: 0, since: state.startedAt || key(today()) };
+  return { belt: last.belt, stripe: last.stripe, since: last.date };
+}
 
 function load() {
   try {
@@ -118,11 +134,15 @@ function load() {
 
 function normalize(d) {
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-  const belt = clamp(Number(d.belt) || 0, 0, BLACK);
-  const stripe = belt >= BLACK ? 0 : clamp(Number(d.stripe) || 0, 0, MAX_STRIPE);
   const att = Array.isArray(d.attendance)
     ? [...new Set(d.attendance.filter(s => typeof s === "string" && DATE_RE.test(s)))].sort()
     : [];
+  const rem = {};
+  if (d.removed && typeof d.removed === "object" && !Array.isArray(d.removed)) {
+    for (const [k, v] of Object.entries(d.removed)) {
+      if (DATE_RE.test(k) && typeof v === "string" && v) rem[k] = v;
+    }
+  }
   // 날짜를 키로 중복 제거 + 오름차순 정렬 — 손으로 만든 파일을 불러와도 불변식이 유지된다
   const hist = Array.isArray(d.history)
     ? [...new Map(d.history
@@ -133,11 +153,11 @@ function normalize(d) {
                             stripe: b >= BLACK ? 0 : clamp(Number(h.stripe) || 0, 0, MAX_STRIPE) }];
         })).values()].sort((a, b) => a.date.localeCompare(b.date))
     : [];
+  // 켜진 날짜와 끈 날짜가 겹치면 취소가 이긴다 (재체크 시 removed 키를 지우므로)
   return {
-    belt, stripe,
     startedAt: DATE_RE.test(d.startedAt) ? d.startedAt : "",
-    promotedAt: DATE_RE.test(d.promotedAt) ? d.promotedAt : key(today()),
-    attendance: att,
+    attendance: att.filter(k => !rem[k]),
+    removed: rem,
     history: hist,
     updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : ""
   };
@@ -169,16 +189,22 @@ function hasAttended(k) {
   return state.attendance.includes(k);
 }
 
-/** 출석 토글. 미래 날짜는 무시 */
+/**
+ * 출석 토글. 미래 날짜는 무시.
+ * 취소는 removed 에 시각과 함께 남긴다 — 그러지 않으면 동기화 시 원격의
+ * 합집합 병합으로 방금 지운 날짜가 되살아난다.
+ */
 function toggleDay(k) {
   if (parseKey(k) > today()) return;
   const i = state.attendance.indexOf(k);
   if (i >= 0) {
     state.attendance.splice(i, 1);
+    state.removed[k] = new Date().toISOString();
     toast(fmtShort(k) + " 출석 취소");
   } else {
     state.attendance.push(k);
     state.attendance.sort();
+    delete state.removed[k];
     toast(fmtShort(k) + " 출석 완료 💪");
   }
   save();
@@ -194,9 +220,30 @@ function fmtShort(k) {
 
 /** 현재 단계(승급일 이후)의 출석 일수 */
 function currentStageDays() {
-  const from = state.promotedAt;
+  const from = currentRank().since;
   const to = key(today());
   return state.attendance.filter(k => k >= from && k <= to).length;
+}
+
+/* ============================================================
+   승급식 — 매월 마지막 금요일
+   ============================================================ */
+
+/** y년 m월(0-based)의 마지막 금요일 */
+function lastFridayOf(y, m) {
+  const last = new Date(y, m + 1, 0);            // 그 달 말일
+  const back = (last.getDay() - 5 + 7) % 7;      // 금요일 = 5
+  return new Date(y, m, last.getDate() - back);
+}
+
+/** d 이상인 첫 승급식 */
+function ceremonyOnOrAfter(d) {
+  const c = lastFridayOf(d.getFullYear(), d.getMonth());
+  return c >= d ? c : lastFridayOf(d.getFullYear(), d.getMonth() + 1);
+}
+
+function fmtMD(d) {
+  return `${d.getMonth() + 1}/${d.getDate()}(${DOW[d.getDay()]})`;
 }
 
 /* ============================================================
@@ -216,29 +263,53 @@ function render() {
   renderSync();
 }
 
-function renderBelt() {
-  const isBlack = state.belt >= BLACK;
-  $("beltTitle").textContent = labelOf(state.belt, state.stripe);
-
-  const since = daysBetween(parseKey(state.promotedAt), today());
-  $("beltSub").textContent = since >= 0
-    ? `${state.promotedAt} 시작 · ${since}일째`
-    : `${state.promotedAt} 시작 예정`;
-
-  const bar = $("beltBar");
-  bar.style.background = BELTS[state.belt].css;
+/**
+ * 벨트 그래픽을 그린다. 감긴 그랄만 표시하고 빈 슬롯은 그리지 않는다.
+ * 헤더·진행도·로드맵이 모두 이 함수를 쓴다.
+ */
+function paintBelt(bar, belt, stripe) {
+  const isBlack = belt >= BLACK;
+  bar.style.background = BELTS[belt].css;
   bar.classList.toggle("is-black", isBlack);
+  bar.setAttribute("aria-label", labelOf(belt, stripe));
+  bar.title = labelOf(belt, stripe);
 
-  // 감긴 그랄만 그린다 — 빈 슬롯은 표시하지 않음
-  const wrap = $("beltStripes");
+  let wrap = bar.querySelector(".stripes");
+  if (!wrap) {
+    bar.innerHTML = '<div class="black-tip"></div><div class="stripes"></div>';
+    wrap = bar.querySelector(".stripes");
+  }
   wrap.innerHTML = "";
   if (!isBlack) {
-    for (let i = 0; i < state.stripe; i++) {
+    for (let i = 0; i < stripe; i++) {
       const s = document.createElement("div");
       s.className = "stripe";
       wrap.appendChild(s);
     }
   }
+}
+
+/** 새 벨트 그래픽 요소를 만든다 (로드맵·진행도용) */
+function beltEl(belt, stripe, cls) {
+  const mount = document.createElement("div");
+  mount.className = "belt-mount " + (cls || "");
+  const bar = document.createElement("div");
+  bar.className = "belt-bar";
+  mount.appendChild(bar);
+  paintBelt(bar, belt, stripe);
+  return mount;
+}
+
+function renderBelt() {
+  const { belt, stripe, since } = currentRank();
+  paintBelt($("beltBar"), belt, stripe);
+
+  // 승급 이력이 없으면 "승급"이 아니라 "시작"이다
+  const word = state.history.length ? "승급" : "시작";
+  const days = daysBetween(parseKey(since), today());
+  $("beltSub").textContent = days >= 0
+    ? `${since} ${word} · ${days}일째`
+    : `${since} ${word} 예정`;
 }
 
 function renderToday() {
@@ -254,12 +325,14 @@ function renderToday() {
 }
 
 function renderGoal() {
-  const req = requirementOf(state.belt, state.stripe);
-  const from = parseKey(state.promotedAt);
+  const { belt, stripe, since } = currentRank();
+  const req = requirementOf(belt, stripe);
+  const from = parseKey(since);
   const t = today();
+  const goalBelt = $("goalBelt");
 
   if (!req) {
-    $("goalTo").textContent = "블랙벨트 도달";
+    goalBelt.hidden = true;
     $("goalPct").textContent = "100%";
     // setBar 로 채워야 이전 렌더가 남긴 미달(주황) 클래스까지 초기화된다
     ["mMonths", "mDays"].forEach(p => {
@@ -273,8 +346,9 @@ function renderGoal() {
     return;
   }
 
-  const nx = nextOf(state.belt, state.stripe);
-  $("goalTo").textContent = labelOf(nx.belt, nx.stripe);
+  const nx = nextOf(belt, stripe);
+  goalBelt.hidden = false;
+  paintBelt($("goalBeltBar"), nx.belt, nx.stripe);
 
   // 기간
   const elapsed = monthsElapsed(from, t);
@@ -286,8 +360,8 @@ function renderGoal() {
   $("mMonthsVal").innerHTML = `<b>${elapsed.toFixed(1)}</b> / ${req.months}개월`;
   setBar("mMonthsBar", monthsPct, monthsOk);
   $("mMonthsNote").textContent = monthsOk
-    ? `충족 · ${targetDate.getFullYear()}. ${targetDate.getMonth() + 1}. ${targetDate.getDate()}. 통과`
-    : `${targetDate.getFullYear()}. ${targetDate.getMonth() + 1}. ${targetDate.getDate()}. 충족 (D-${dLeft})`;
+    ? `충족 · ${key(targetDate)} 통과`
+    : `${key(targetDate)} 충족 (D-${dLeft})`;
 
   // 출석
   const days = currentStageDays();
@@ -295,33 +369,48 @@ function renderGoal() {
   const daysOk = days >= req.days;
   const remain = req.days - days;
 
+  /*
+   * 승급식은 매월 마지막 금요일. 두 조건이 모두 채워질 수 있는 가장 이른 날 이후의
+   * 첫 승급식이 목표다. 출석은 하루 한 번이라 남은 N일을 채우려면 최소 N일이 걸리는데,
+   * 이걸 빼먹으면 "8/28 승급식"이라 해놓고 "주 8.5회 필요" 같은 모순이 나온다.
+   */
+  const earliest = new Date(Math.max(targetDate, addDays(t, Math.max(0, remain))));
+  const ceremony = ceremonyOnOrAfter(earliest > t ? earliest : t);
+  const dCeremony = daysBetween(t, ceremony);
+
   $("mDaysVal").innerHTML = `<b>${days}</b> / ${req.days}일`;
   setBar("mDaysBar", daysPct, daysOk);
-  $("mDaysNote").textContent = daysOk ? "충족" : `${remain}일 더 필요` + pacingHint(remain, dLeft);
+  $("mDaysNote").textContent = daysOk
+    ? "충족"
+    : `${remain}일 더 필요` + pacingHint(remain, dCeremony);
 
   // 종합 = 두 조건 모두 필요하므로 낮은 쪽
-  const overall = Math.min(monthsPct, daysPct);
-  $("goalPct").textContent = Math.floor(overall * 100) + "%";
+  $("goalPct").textContent = Math.floor(Math.min(monthsPct, daysPct) * 100) + "%";
 
   const box = $("readyBox");
+  const cer = `${fmtMD(ceremony)} 승급식`;
   if (monthsOk && daysOk) {
     box.className = "ready";
-    box.textContent = "✅ 최소 승급 기준 충족 — 관장님만 믿습니다";
+    box.innerHTML = `✅ 기준 충족 · <b>${cer}</b> D-${dCeremony}`;
   } else {
     box.className = "ready wait";
     const parts = [];
-    if (!monthsOk) parts.push(`기간 ${dLeft}일`);
-    if (!daysOk) parts.push(`출석 ${remain}일`);
-    box.textContent = "남은 조건 · " + parts.join(" / ");
+    if (!monthsOk) parts.push(`기간 D-${dLeft}`);
+    if (!daysOk) parts.push(`출석 ${remain}일 부족`);
+    box.innerHTML = `${parts.join(" · ")} · 빠르면 <b>${cer}</b>`;
   }
 }
 
-/** 기간 조건보다 출석이 뒤처지면 주당 몇 회 필요한지 귀띔 */
-function pacingHint(remainDays, daysLeftForMonths) {
-  if (remainDays <= 0 || daysLeftForMonths <= 0) return "";
-  const perWeek = remainDays / (daysLeftForMonths / 7);
+/** 목표 승급식까지 주당 몇 회 나가야 출석 조건을 채우는지 */
+function pacingHint(remainDays, daysToCeremony) {
+  if (remainDays <= 0) return "";
+  if (daysToCeremony <= 0) return "";
+  const weeks = daysToCeremony / 7;
+  const perWeek = remainDays / weeks;
+  // 주 7회를 넘으면 그 승급식엔 물리적으로 불가능
+  if (perWeek > 7) return " · 다음 승급식엔 불가능";
   if (perWeek <= 0.5) return "";
-  return ` · 기간 충족일까지 주 ${perWeek.toFixed(1)}회 필요`;
+  return ` · 승급식까지 주 ${perWeek.toFixed(1)}회`;
 }
 
 function setBar(id, pct, ok) {
@@ -347,6 +436,8 @@ function renderCalendar() {
   const first = new Date(y, m, 1);
   const lastDate = new Date(y, m + 1, 0).getDate();
   const tk = key(today());
+  const since = currentRank().since;
+  const ceremonyK = key(lastFridayOf(y, m));      // 이 달의 승급식
 
   for (let i = 0; i < first.getDay(); i++) {
     const b = document.createElement("div");
@@ -361,10 +452,11 @@ function renderCalendar() {
     if (hasAttended(dk)) cls.push("on");
     if (dk === tk) cls.push("today");
     if (dk > tk) cls.push("future");
-    if (dk < state.promotedAt) cls.push("before-promo");
+    if (dk < since) cls.push("before-promo");
+    if (dk === ceremonyK) cls.push("ceremony");
     btn.className = cls.join(" ");
     btn.textContent = d;
-    if (dk === state.promotedAt || state.history.some(h => h.date === dk)) {
+    if (state.history.some(h => h.date === dk)) {
       const dot = document.createElement("span");
       dot.className = "promo-dot";
       btn.appendChild(dot);
@@ -411,12 +503,13 @@ function renderStats() {
 }
 
 function renderRoadmap() {
-  const req = requirementOf(state.belt, state.stripe);
-  const step = stepIndexOf(state.belt, state.stripe);
+  const { belt, stripe, since } = currentRank();
+  const req = requirementOf(belt, stripe);
+  const step = stepIndexOf(belt, stripe);
 
   let inStep = 0;
   if (req) {
-    const mPct = clamp(monthsElapsed(parseKey(state.promotedAt), today()) / req.months, 0, 1);
+    const mPct = clamp(monthsElapsed(parseKey(since), today()) / req.months, 0, 1);
     const dPct = clamp(currentStageDays() / req.days, 0, 1);
     inStep = Math.min(mPct, dPct);
   }
@@ -430,12 +523,10 @@ function renderRoadmap() {
   list.innerHTML = "";
   for (let b = 0; b < BLACK; b++) {
     const row = document.createElement("div");
-    row.className = "road-row" + (b === state.belt ? " cur" : "");
+    row.className = "road-row" + (b === belt ? " cur" : "");
 
-    const nm = document.createElement("div");
-    nm.className = "nm";
-    nm.textContent = BELTS[b].name;
-    row.appendChild(nm);
+    // 벨트 이름 텍스트 대신 벨트 그래픽. 그랄은 오른쪽 칸이 나타내므로 0그랄로 그린다
+    row.appendChild(beltEl(b, 0, "belt-xs"));
 
     const dots = document.createElement("div");
     dots.className = "road-dots";
@@ -458,10 +549,16 @@ function renderRoadmap() {
   }
 
   const blackRow = document.createElement("div");
-  blackRow.className = "road-row" + (state.belt >= BLACK ? " cur" : "");
-  blackRow.innerHTML = `<div class="nm">블랙</div>
-    <div class="road-dots"><i class="${state.belt >= BLACK ? "done" : ""}"></i></div>
-    <div class="rq">목표</div>`;
+  blackRow.className = "road-row" + (belt >= BLACK ? " cur" : "");
+  blackRow.appendChild(beltEl(BLACK, 0, "belt-xs"));
+  const bDots = document.createElement("div");
+  bDots.className = "road-dots";
+  bDots.innerHTML = `<i class="${belt >= BLACK ? "done" : ""}"></i>`;
+  blackRow.appendChild(bDots);
+  const bRq = document.createElement("div");
+  bRq.className = "rq";
+  bRq.textContent = "목표";
+  blackRow.appendChild(bRq);
   list.appendChild(blackRow);
 
   const note = document.createElement("p");
@@ -472,20 +569,9 @@ function renderRoadmap() {
 }
 
 function renderSettings() {
-  const bs = $("setBelt");
-  if (!bs.options.length) {
-    BELTS.forEach((b, i) => bs.add(new Option(b.name, i)));
-    const ss = $("setStripe");
-    for (let i = 0; i <= MAX_STRIPE; i++) ss.add(new Option(i + "그랄", i));
-  }
-  bs.value = state.belt;
-  $("setStripe").value = state.stripe;
-  $("setStripe").disabled = state.belt >= BLACK;
   $("setStarted").value = state.startedAt;
   $("setStarted").max = key(today());
-  $("setPromoted").value = state.promotedAt;
-  $("setPromoted").max = key(today());
-  // 승급 기록 폼의 셀렉트도 한 번만 채운다
+  // 승급 기록 폼의 셀렉트는 한 번만 채운다
   const hb = $("histBelt");
   if (!hb.options.length) {
     BELTS.forEach((b, i) => hb.add(new Option(b.name, i)));
@@ -500,8 +586,8 @@ function renderSettings() {
 }
 
 /**
- * 현재 단계를 만든 승급(날짜가 단계 시작일과 같은 항목)만 [되돌리기],
- * 나머지는 순수 기록이므로 [삭제].
+ * 현재 벨트는 마지막 항목에서 파생되므로, 최신 항목을 지우면 자동으로
+ * 직전 상태로 돌아간다 — 되돌리기와 삭제를 따로 둘 필요가 없다.
  */
 function renderHistory() {
   const h = $("histList");
@@ -515,17 +601,16 @@ function renderHistory() {
     const item = document.createElement("div");
     item.className = "item";
     const span = document.createElement("span");
-    span.innerHTML = `${rec.date} · <b>${labelOf(rec.belt, rec.stripe)}</b>`;
+    span.className = "hist-label";
+    span.appendChild(beltEl(rec.belt, rec.stripe, "belt-xs"));
+    const txt = document.createElement("span");
+    txt.innerHTML = `${rec.date}${i === 0 ? " · <b>현재</b>" : ""}`;
+    span.appendChild(txt);
     item.appendChild(span);
 
     const btn = document.createElement("button");
-    if (i === 0 && rec.date === state.promotedAt) {
-      btn.textContent = "되돌리기";
-      btn.onclick = undoPromotion;
-    } else {
-      btn.textContent = "삭제";
-      btn.onclick = () => deleteHistory(rec.date);
-    }
+    btn.textContent = "삭제";
+    btn.onclick = () => deleteHistory(rec.date);
     item.appendChild(btn);
     h.appendChild(item);
   });
@@ -542,13 +627,14 @@ function renderHistEffect() {
   const belt = clamp(Number($("histBelt").value), 0, BLACK);
   const stripe = belt >= BLACK ? 0 : clamp(Number($("histStripe").value), 0, MAX_STRIPE);
   el.innerHTML = becomesCurrent(date)
-    ? `현재 벨트가 <b>${labelOf(belt, stripe)}</b>로 바뀌고 단계 시작일이 <b>${date}</b>가 됩니다.`
-    : `현재 단계 시작일(${state.promotedAt})보다 이전이라 <b>이력에만</b> 남습니다.`;
+    ? `현재 벨트가 <b>${labelOf(belt, stripe)}</b>${subjectParticle(labelOf(belt, stripe))} 되고, 이 날부터 다음 승급 기준을 셉니다.`
+    : `더 최근 승급(${currentRank().since})이 있어 <b>이력에만</b> 남습니다.`;
 }
 
-/** 이 승급일이 현재 단계를 대체하는지 — 단계 시작일 이후면 최신 승급으로 본다 */
+/** 이 승급일이 가장 최근이 되는지 — 그러면 현재 벨트가 이 기록으로 바뀐다 */
 function becomesCurrent(date) {
-  return date >= state.promotedAt;
+  const last = state.history[state.history.length - 1];
+  return !last || date >= last.date;
 }
 
 /* ============================================================
@@ -564,8 +650,8 @@ function putHistory(rec) {
 
 /**
  * 승급 기록 — 오늘 받은 것과 지난 승급을 같은 경로로 처리한다.
- * 승급일이 현재 단계 시작일 이후면 현재 벨트·시작일까지 갱신하고,
- * 그보다 이전이면 이력에만 남긴다. 출석 기록은 어느 쪽이든 건드리지 않는다.
+ * 현재 벨트·단계 시작일은 이력의 마지막 항목에서 파생되므로 따로 대입하지 않는다.
+ * 출석 기록은 어느 쪽이든 건드리지 않는다.
  */
 function recordPromotion() {
   const date = $("histDate").value;
@@ -579,11 +665,6 @@ function recordPromotion() {
 
   const current = becomesCurrent(date);
   putHistory({ date, belt, stripe });
-  if (current) {
-    state.belt = belt;
-    state.stripe = stripe;
-    state.promotedAt = date;
-  }
   save();
   $("histForm").hidden = true;
   render();
@@ -600,30 +681,6 @@ function deleteHistory(date) {
   save();
   render();
   toast("기록을 삭제했습니다");
-}
-
-/** 최신 이력을 지우고 현재 벨트·단계 시작일을 그 이전 이력으로 되돌린다 */
-function undoPromotion() {
-  if (!state.history.length) return;
-  const sorted = [...state.history].sort((a, b) => a.date.localeCompare(b.date));
-  const last = sorted[sorted.length - 1];
-  if (!confirm(`${last.date} · ${labelOf(last.belt, last.stripe)} 승급을 되돌립니다. 계속할까요?`)) return;
-
-  state.history = sorted.slice(0, -1);
-  const prev = state.history[state.history.length - 1];
-  if (prev) {
-    state.belt = prev.belt;
-    state.stripe = prev.stripe;
-    state.promotedAt = prev.date;
-  } else {
-    // 이력이 비면 한 단계 아래로 되돌리되, 시작일은 사용자가 설정에서 조정
-    const step = Math.max(0, stepIndexOf(state.belt, state.stripe) - 1);
-    state.belt = Math.floor(step / (MAX_STRIPE + 1));
-    state.stripe = step % (MAX_STRIPE + 1);
-  }
-  save();
-  render();
-  toast("승급을 되돌렸습니다");
 }
 
 function exportData() {
@@ -710,26 +767,46 @@ async function gh(path, opts = {}) {
   return res.json();
 }
 
-/** 출석 날짜는 합집합, 벨트·시작일 등 스칼라는 나중에 수정한 쪽이 이긴다 */
+/**
+ * 문서 병합.
+ *
+ * 출석은 단순 합집합이 아니다 — 그러면 방금 취소한 날짜가 원격에서 되살아나
+ * 해제가 아예 동작하지 않는다. 날짜마다 "켠 시각 vs 끈 시각"을 비교해 늦은 쪽을 따른다.
+ * 켠 시각은 따로 저장하지 않고 그 문서의 updatedAt 을 대용으로 쓴다
+ * (변경 직후 곧바로 push 하므로 충분히 근사하다).
+ */
 function mergeStates(a, b) {
-  const newer = (b.updatedAt || "") > (a.updatedAt || "") ? b : a;
   const histByDate = new Map();
   [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
+
+  const dates = new Set([...a.attendance, ...b.attendance,
+                         ...Object.keys(a.removed), ...Object.keys(b.removed)]);
+  const attendance = [], removed = {};
+  for (const d of dates) {
+    // 각 문서가 이 날짜에 대해 주장하는 (상태, 시각)
+    const sideOf = s => s.removed[d] ? { on: false, at: s.removed[d] }
+                      : s.attendance.includes(d) ? { on: true, at: s.updatedAt || "" }
+                      : null;
+    const x = sideOf(a), y = sideOf(b);
+    const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
+    if (!win) continue;
+    if (win.on) attendance.push(d);
+    else removed[d] = win.at;
+  }
+
   return {
-    belt: newer.belt,
-    stripe: newer.stripe,
     // 시작일은 "가장 이른 기록"이 진실이므로 최신 우선이 아니라 최소값을 쓴다
     startedAt: [a.startedAt, b.startedAt].filter(Boolean).sort()[0] || "",
-    promotedAt: newer.promotedAt,
-    attendance: [...new Set([...a.attendance, ...b.attendance])].sort(),
+    attendance: attendance.sort(),
+    removed,
+    // 벨트·단계 시작일은 이력에서 파생되므로 이력만 합치면 된다
     history: [...histByDate.values()].sort((x, y) => x.date.localeCompare(y.date)),
-    updatedAt: newer.updatedAt || ""
+    updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt
   };
 }
 
 function sameState(a, b) {
-  const norm = s => JSON.stringify([s.belt, s.stripe, s.startedAt, s.promotedAt,
-                                    s.attendance, s.history]);
+  const norm = s => JSON.stringify([s.startedAt, s.attendance, s.removed, s.history]);
   return norm(a) === norm(b);
 }
 
@@ -909,15 +986,6 @@ $("calNext").onclick = () => {
   renderCalendar();
 };
 
-$("setBelt").onchange = e => {
-  state.belt = clamp(Number(e.target.value), 0, BLACK);
-  if (state.belt >= BLACK) state.stripe = 0;
-  save(); render();
-};
-$("setStripe").onchange = e => {
-  state.stripe = clamp(Number(e.target.value), 0, MAX_STRIPE);
-  save(); render();
-};
 $("setStarted").onchange = e => {
   const v = e.target.value;
   if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { e.target.value = state.startedAt; return; }
@@ -930,24 +998,13 @@ $("setStarted").onchange = e => {
   save(); render();
 };
 
-$("setPromoted").onchange = e => {
-  const v = e.target.value;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { e.target.value = state.promotedAt; return; }
-  if (parseKey(v) > today()) {
-    alert("단계 시작일은 오늘 이후일 수 없습니다.");
-    e.target.value = state.promotedAt;
-    return;
-  }
-  state.promotedAt = v;
-  save(); render();
-};
-
 $("btnAddHist").onclick = () => {
   const f = $("histForm");
   f.hidden = !f.hidden;
   if (!f.hidden) {
     // 기본값: 오늘 + 다음 그랄/벨트. 지난 승급이면 날짜만 바꾸면 된다
-    const nx = nextOf(state.belt, state.stripe);
+    const cur = currentRank();
+    const nx = nextOf(cur.belt, cur.stripe);
     $("histDate").value = key(today());
     $("histBelt").value = nx.belt;
     $("histStripe").value = nx.stripe;

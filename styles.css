@@ -44,8 +44,10 @@ h2 { font-size: 13px; margin: 0 0 12px; color: var(--muted); font-weight: 600;
 }
 
 /* ---------- 헤더 / 벨트 배지 ---------- */
-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
-header .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+/* 벨트 그래픽이 곧 현재 등급 표시 — 이름 텍스트 없이 가운데 배치 */
+header { display: flex; flex-direction: column; align-items: center; gap: 8px;
+         margin: 6px 0 22px; }
+header .sub { font-size: 12px; color: var(--muted); }
 
 /*
  * 실물 벨트 축소판. 감긴 그랄만 그리고 빈 슬롯은 표시하지 않는다.
@@ -72,6 +74,21 @@ header .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .belt-bar .stripe { width: 3.5px; border-radius: 1px; background: #ffffff; }
 .belt-bar.is-black .black-tip { background: #b91c1c; }
 
+/* 크기 변형 — 헤더는 크게, 진행도는 중간, 로드맵·이력은 작게 */
+.belt-lg .belt-bar { width: 208px; height: 30px; border-radius: 5px; }
+.belt-lg .belt-bar .stripes { right: 8px; top: 5px; bottom: 5px; gap: 4px; }
+.belt-lg .belt-bar .stripe { width: 6px; }
+.belt-lg { padding: 4px; border-radius: 9px; }
+
+.belt-sm .belt-bar { width: 84px; height: 15px; }
+.belt-sm .belt-bar .stripes { right: 4px; top: 3px; bottom: 3px; gap: 2px; }
+.belt-sm .belt-bar .stripe { width: 3px; }
+
+.belt-xs .belt-bar { width: 52px; height: 12px; border-radius: 3px; }
+.belt-xs .belt-bar .stripes { right: 3px; top: 2px; bottom: 2px; gap: 1.5px; }
+.belt-xs .belt-bar .stripe { width: 2px; }
+.belt-xs { padding: 2px; border-radius: 5px; }
+
 /* ---------- 오늘 출석 ---------- */
 .today-row { display: flex; align-items: center; gap: 12px; }
 .today-date { flex: 1; }
@@ -97,10 +114,13 @@ button:disabled { opacity: .4; cursor: default; }
 .btn-danger { color: var(--danger); border-color: #4a2626; background: transparent; }
 
 /* ---------- 진행도 ---------- */
-.goal-head { display: flex; align-items: baseline; justify-content: space-between;
-             margin-bottom: 14px; gap: 8px; }
-.goal-head .to { font-size: 15px; font-weight: 700; }
+.goal-head { display: flex; align-items: center; justify-content: space-between;
+             margin-bottom: 16px; gap: 8px; }
 .goal-head .pct { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+.goal-next { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.goal-word { font-size: 13px; color: var(--muted); flex-shrink: 0; }
+
+.road-head { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; }
 
 .metric { margin-bottom: 14px; }
 .metric:last-child { margin-bottom: 0; }
@@ -147,6 +167,10 @@ button:disabled { opacity: .4; cursor: default; }
 .day.today.on { border-color: #ffffff; }
 .day.before-promo:not(.on) { background: #14171d; color: #5a6270; }
 .day.before-promo.on { background: var(--accent-line); color: #a7f3c8; }
+.day.ceremony { box-shadow: inset 0 0 0 1px var(--warn); }
+.day.ceremony.on { box-shadow: none; }
+.leg-cer { width: 10px; height: 10px; border-radius: 3px; display: inline-block;
+           box-shadow: inset 0 0 0 1px var(--warn); background: var(--surface-2); }
 .day .promo-dot {
   position: absolute; top: 3px; right: 4px; width: 5px; height: 5px;
   border-radius: 99px; background: var(--warn);
@@ -171,8 +195,8 @@ button:disabled { opacity: .4; cursor: default; }
 .road-total .pct { font-size: 20px; font-weight: 800; }
 .road-list { margin-top: 16px; }
 .road-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
-.road-row .nm { width: 58px; font-size: 13px; color: var(--muted); flex-shrink: 0; }
-.road-row.cur .nm { color: var(--text); font-weight: 700; }
+.road-row > .belt-mount { flex-shrink: 0; opacity: .55; transition: opacity .15s; }
+.road-row.cur > .belt-mount { opacity: 1; }
 .road-dots { display: flex; gap: 5px; flex: 1; }
 .road-dots i {
   flex: 1; height: 9px; border-radius: 3px; background: var(--surface-2);
@@ -212,6 +236,7 @@ select, input[type="date"], input[type="password"] {
 .hist .item { display: flex; justify-content: space-between; align-items: center; gap: 8px;
               padding: 7px 0; border-top: 1px solid var(--line); color: var(--muted); }
 .hist .item b { color: var(--text); font-weight: 600; }
+.hist-label { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .hist .item button { padding: 3px 8px; font-size: 11px; }
 .hist .empty { color: var(--muted); padding: 7px 0; border-top: 1px solid var(--line); }
 

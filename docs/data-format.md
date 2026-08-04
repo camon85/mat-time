@@ -48,26 +48,23 @@ localStorage·백업 파일·Gist **세 곳의 내용은 완전히 동일한 형
 
 ```json
 {
-  "belt": 0,
-  "stripe": 2,
   "startedAt": "2020-03-01",
-  "promotedAt": "2026-06-01",
   "attendance": ["2026-08-01", "2026-08-04"],
+  "removed": { "2026-07-15": "2026-08-05T02:10:11.000Z" },
   "history": [
-    { "date": "2025-09-10", "belt": 0, "stripe": 1 }
+    { "date": "2025-09-10", "belt": 0, "stripe": 1 },
+    { "date": "2026-06-01", "belt": 0, "stripe": 2 }
   ],
-  "updatedAt": "2026-08-04T02:00:28.131Z"
+  "updatedAt": "2026-08-05T02:00:28.131Z"
 }
 ```
 
 | 필드 | 타입 | 필수 | 의미 |
 |---|---|---|---|
-| `belt` | `0..4` | ✔ | 현재 벨트 (§4) |
-| `stripe` | `0..4` | ✔ | 현재 그랄 수. `belt === 4`(블랙)이면 항상 `0` |
 | `startedAt` | 날짜 \| `""` | ✔ | **주짓수를 처음 시작한 날**. `""` = 미설정. 표시 전용 |
-| `promotedAt` | 날짜 | ✔ | **현재 벨트·그랄을 받은 날** = 현재 단계 시작일. 모든 승급 계산의 기준점 |
 | `attendance` | 날짜[] | ✔ | 출석한 날. 중복 없음, 오름차순 |
-| `history` | 항목[] | ✔ | 승급 이력. `date` 중복 없음, `date` 오름차순 |
+| `removed` | {날짜: ISO} | ✔ | **출석을 취소한 날짜 → 취소 시각.** 병합 시 삭제를 전파하는 데 쓴다 (§7) |
+| `history` | 항목[] | ✔ | 승급 이력. `date` 중복 없음, `date` 오름차순. **현재 벨트의 원천** |
 | `updatedAt` | ISO 문자열 \| `""` | ✔ | 마지막 사용자 변경 시각(UTC). 병합 시 승자 판정에 사용 (§7) |
 
 `history` 항목:
@@ -78,7 +75,23 @@ localStorage·백업 파일·Gist **세 곳의 내용은 완전히 동일한 형
 | `belt` | `0..4` | 그날 **받은** 벨트 |
 | `stripe` | `0..4` | 그날 **받은** 그랄 수. `belt === 4`이면 `0` |
 
-> `startedAt` 과 `promotedAt` 은 이름이 비슷하지만 역할이 다르다.
+### 현재 벨트는 저장하지 않는다 — 이력에서 파생
+
+"현재 벨트·그랄"과 "현재 단계 시작일"은 별도 필드가 아니다.
+**승급 이력의 마지막 항목**이 곧 현재 상태다. 승급일과 단계 시작일이 같은 사실이기 때문.
+
+```js
+function currentRank(doc) {
+  const last = doc.history[doc.history.length - 1];       // 날짜 오름차순 보장
+  if (!last) return { belt: 0, stripe: 0, since: doc.startedAt || todayKey };
+  return { belt: last.belt, stripe: last.stripe, since: last.date };
+}
+```
+
+이력이 비어 있으면 화이트 0그랄로 보고, 기준일은 `startedAt`(없으면 오늘)을 쓴다.
+따라서 최신 이력을 지우면 자동으로 직전 상태로 돌아간다.
+
+> `startedAt` 과 현재 단계 시작일은 다르다.
 > `startedAt` 은 총 수련 기간 표시에만 쓰이고 **승급 계산에 관여하지 않는다**.
 
 ---
@@ -133,6 +146,32 @@ function next(belt, stripe) {
 }
 ```
 
+### 5.1 승급식 — 매월 마지막 금요일
+
+기준을 채웠다고 그날 바로 승급하는 게 아니다. 승급식은 **매월 마지막 금요일**에 열린다.
+
+```js
+function lastFridayOf(y, m) {                    // m 은 0-based
+  const last = new Date(y, m + 1, 0);            // 그 달 말일
+  const back = (last.getDay() - 5 + 7) % 7;      // 금요일 = 5
+  return new Date(y, m, last.getDate() - back);
+}
+
+function ceremonyOnOrAfter(d) {
+  const c = lastFridayOf(d.getFullYear(), d.getMonth());
+  return c >= d ? c : lastFridayOf(d.getFullYear(), d.getMonth() + 1);
+}
+```
+
+**목표 승급식**은 두 조건이 모두 채워질 수 있는 가장 이른 날 이후의 첫 승급식이다.
+출석은 하루 한 번뿐이라 남은 N일을 채우려면 최소 N일이 걸린다 — 이걸 빼먹으면
+"이번 달 승급식"이라 해놓고 "주 8회 필요" 같은 불가능한 안내가 나온다.
+
+```js
+const earliest = max(기간충족일, 오늘 + 남은출석일수);
+const ceremony = ceremonyOnOrAfter(max(earliest, 오늘));
+```
+
 ---
 
 ## 6. 파생 계산
@@ -141,10 +180,11 @@ function next(belt, stripe) {
 
 ### 6.1 현재 단계 출석 일수
 
-`promotedAt` 이상 오늘 이하인 출석만 센다. 승급해도 과거 출석은 지우지 않으므로 필터가 필요하다.
+현재 단계 시작일(= 마지막 승급일) 이상 오늘 이하인 출석만 센다. 승급해도 과거 출석은 지우지 않으므로 필터가 필요하다.
 
 ```js
-const stageDays = doc.attendance.filter(k => k >= doc.promotedAt && k <= todayKey).length;
+const since = currentRank(doc).since;
+const stageDays = doc.attendance.filter(k => k >= since && k <= todayKey).length;
 ```
 
 ### 6.2 개월 수 — 말일 보정에 주의
@@ -160,7 +200,7 @@ function addMonths(d, n) {
 }
 
 // 기간 조건 충족 여부
-const targetDate = addMonths(parseDate(doc.promotedAt), req.months);
+const targetDate = addMonths(parseDate(currentRank(doc).since), req.months);
 const monthsMet = today >= targetDate;
 ```
 
@@ -184,7 +224,7 @@ function monthsElapsed(from, to) {
 const monthsPct = clamp01(monthsElapsed(from, today) / req.months);
 const daysPct   = clamp01(stageDays / req.days);
 const stagePct  = Math.min(monthsPct, daysPct);              // 현재 단계 진행률
-const totalPct  = (stepIndex(doc.belt, doc.stripe) + stagePct) / TOTAL_STEPS;
+const totalPct  = (stepIndex(cur.belt, cur.stripe) + stagePct) / TOTAL_STEPS;
 ```
 
 ### 6.4 총 수련 기간
@@ -195,65 +235,87 @@ const totalPct  = (stepIndex(doc.belt, doc.stripe) + stagePct) / TOTAL_STEPS;
 
 ## 7. 병합 규칙 (동기화)
 
-두 기기의 문서를 합칠 때 필드별로 규칙이 다르다.
+| 필드 | 규칙 |
+|---|---|
+| `attendance` / `removed` | 날짜마다 **켠 시각 vs 끈 시각**을 비교해 늦은 쪽 (아래) |
+| `history` | `date` 를 키로 한 합집합 — 같은 날짜는 한쪽 값으로 덮어씀 |
+| `startedAt` | **더 이른 날짜** (빈 값은 무시). 시작일은 가장 이른 기록이 진실 |
+| `updatedAt` | 둘 중 더 최신값 |
 
-| 필드 | 규칙 | 이유 |
-|---|---|---|
-| `attendance` | **합집합** | 양쪽에서 체크한 날을 모두 살린다 |
-| `history` | `date` 를 키로 한 **합집합** | 같은 날짜는 한쪽 값으로 덮어씀 |
-| `startedAt` | **더 이른 날짜** (빈 값은 무시) | 시작일은 가장 이른 기록이 진실. 한쪽에만 있어도 지워지지 않음 |
-| `belt`, `stripe`, `promotedAt` | `updatedAt` 이 **더 최신인 쪽** | 마지막에 수정한 기기의 상태를 따름 |
-| `updatedAt` | 위에서 이긴 쪽의 값 | |
+현재 벨트·단계 시작일은 이력에서 파생되므로 따로 병합할 필요가 없다.
+
+### 7.1 출석은 왜 합집합이 아닌가
+
+단순 합집합으로 하면 **취소가 아예 동작하지 않는다.** 방금 지운 날짜가 원격 문서에
+아직 남아 있어 다음 동기화에서 그대로 되살아나기 때문이다. 기기가 한 대여도 그렇다.
+
+그래서 취소한 날짜를 `removed` 에 **취소 시각과 함께** 남긴다. 병합할 때는 날짜마다
+양쪽 문서가 주장하는 (상태, 시각)을 만들어 늦은 쪽을 채택한다.
+
+- `removed[d]` 가 있으면 → `(off, removed[d])`
+- 없고 `attendance` 에 있으면 → `(on, 그 문서의 updatedAt)`
+- 둘 다 아니면 → 그 문서는 이 날짜에 대해 주장하지 않음
+
+켠 시각을 따로 저장하지 않고 문서의 `updatedAt` 을 대용으로 쓴다. 변경 직후 곧바로
+push 하므로 실용적으로 충분하다. 다시 체크하면 `removed` 키를 지우고 `attendance` 에
+넣으므로, 그 문서의 `updatedAt` 이 갱신되어 재체크가 이긴다.
 
 ```js
 function merge(a, b) {
-  const newer = (b.updatedAt || "") > (a.updatedAt || "") ? b : a;
   const histByDate = new Map();
   [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
+
+  const dates = new Set([...a.attendance, ...b.attendance,
+                         ...Object.keys(a.removed), ...Object.keys(b.removed)]);
+  const attendance = [], removed = {};
+  for (const d of dates) {
+    const sideOf = s => s.removed[d] ? { on: false, at: s.removed[d] }
+                      : s.attendance.includes(d) ? { on: true, at: s.updatedAt || "" }
+                      : null;
+    const x = sideOf(a), y = sideOf(b);
+    const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
+    if (!win) continue;
+    win.on ? attendance.push(d) : (removed[d] = win.at);
+  }
+
   return {
-    belt: newer.belt, stripe: newer.stripe, promotedAt: newer.promotedAt,
     startedAt: [a.startedAt, b.startedAt].filter(Boolean).sort()[0] || "",
-    attendance: [...new Set([...a.attendance, ...b.attendance])].sort(),
+    attendance: attendance.sort(),
+    removed,
     history: [...histByDate.values()].sort((x, y) => x.date.localeCompare(y.date)),
-    updatedAt: newer.updatedAt || ""
+    updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt
   };
 }
 ```
 
-### 7.1 알려진 한계 — 출석 취소가 되살아난다
+### 7.2 남는 모호함
 
-합집합이므로 **삭제가 전파되지 않는다.** A기기에서 출석을 취소해도 B기기에 그 날짜가 남아 있으면
-다음 동기화에서 복구된다. 취소는 드문 동작이라 단순함을 택한 설계상의 트레이드오프다.
+`updatedAt` 은 그 문서의 **마지막** 변경 시각이지 해당 날짜를 켠 시각이 아니다.
+A가 어떤 날짜를 취소한 뒤 다른 항목을 고쳐 `updatedAt` 만 밀리는 식의 순서에서는
+판정이 뒤집힐 수 있다. 정확도를 더 올리려면 날짜마다 켠 시각을 저장하면 되지만
+(문서 크기 3~5배), 실사용에서 문제된 적은 없어 현재 방식을 쓴다.
 
-이 데이터를 쓰는 다른 앱에서 **삭제까지 정확히 동기화하려면** 삭제 기록(tombstone)을 추가해야 한다.
-예: `"deleted": ["2026-07-15"]` 를 두고 합집합에서 차집합하는 방식.
-그런 필드를 추가해도 이 앱은 `normalize()` 에서 모르는 필드를 버리므로 **깨지지 않는다** (§9).
-
-### 7.2 덮어쓰기가 필요한 경우
+### 7.3 덮어쓰기가 필요한 경우
 
 초기화·백업 복원은 병합하면 지운 데이터가 되돌아온다. 이때는 병합 없이 원격을 **덮어쓴다**.
-
----
 
 ## 8. 불변식
 
 앱이 저장한 문서라면 아래는 항상 참이다. 읽는 쪽에서 믿어도 된다.
 
 1. `attendance` 는 중복이 없고 오름차순이다
-2. `history` 는 `date` 가 유일하고 오름차순이다
-3. `belt` 는 `0..4`, `stripe` 는 `0..4`, `belt === 4`면 `stripe === 0`
-4. 모든 날짜 필드는 `YYYY-MM-DD` 이거나 (`startedAt` 한정) `""` 이다
-5. `promotedAt` 은 항상 존재한다 (미설정 개념이 없다)
+2. `attendance` 와 `removed` 의 키는 겹치지 않는다
+3. `history` 는 `date` 가 유일하고 오름차순이다
+4. `history[i].belt` 는 `0..4`, `stripe` 는 `0..4`, `belt === 4`면 `stripe === 0`
+5. 날짜 필드는 `YYYY-MM-DD` 이거나 (`startedAt` 한정) `""` 이다
 
-**보장하지 않는 것** — 사용자가 설정에서 자유롭게 고칠 수 있으므로 아래는 가정하면 안 된다.
+**보장하지 않는 것** — 사용자가 자유롭게 기록할 수 있으므로 아래는 가정하면 안 된다.
 
-- `startedAt <= promotedAt` 일 것 (역전 가능)
-- `history` 의 마지막 항목이 `promotedAt`·`belt`·`stripe` 와 일치할 것
-  (이력을 비워둔 채 현재 상태만 설정할 수 있다)
-- `history` 의 벨트 순서가 단조증가할 것 (사용자가 임의 순서로 기록 가능)
+- `history` 의 벨트 순서가 단조증가할 것 (임의 순서로 기록 가능)
+- `history` 의 마지막 날짜가 과거일 것 (미래 승급일도 기록 가능 → "승급 예정"으로 표시됨)
+- `startedAt` 이 첫 승급일보다 이를 것
 - 출석 날짜가 `startedAt` 이후일 것
-
----
+- `history` 가 비어 있지 않을 것 (비면 화이트 0그랄로 해석)
 
 ## 9. 관용적 파싱 (`normalize`)
 
@@ -262,11 +324,12 @@ function merge(a, b) {
 | 입력 | 처리 |
 |---|---|
 | 모르는 필드 | **버림** (확장 필드를 넣어도 앱은 깨지지 않지만, 저장 시 사라짐) |
-| `belt`/`stripe` 가 범위 밖·숫자 아님 | `0..4` 로 clamp, 숫자가 아니면 `0` |
-| `belt === 4` 인데 `stripe > 0` | `stripe = 0` 으로 강제 |
+| `history[i].belt`/`stripe` 가 범위 밖·숫자 아님 | `0..4` 로 clamp, 숫자가 아니면 `0` |
+| `history[i].belt === 4` 인데 `stripe > 0` | `stripe = 0` 으로 강제 |
 | `attendance` 의 형식 위반 문자열 | 개별 제거 후 중복 제거·정렬 |
+| `attendance` 와 `removed` 에 같은 날짜 | **취소가 이긴다** (`attendance` 에서 제거) |
+| `removed` 의 잘못된 키·빈 값 | 해당 항목 제거 |
 | `history` 의 `date` 형식 위반 항목 | 항목 제거. 남은 것은 날짜 기준 중복 제거·정렬 |
-| `promotedAt` 누락·형식 위반 | **오늘 날짜**로 대체 |
 | `startedAt` 형식 위반 | `""` (미설정) |
 | `attendance`/`history` 가 배열이 아님 | 빈 배열 |
 
@@ -317,8 +380,9 @@ by_month = collections.Counter(d[:7] for d in doc["attendance"])
 for m, n in sorted(by_month.items()):
     print(m, n)
 
-# 현재 단계 출석 일수
-stage = [d for d in doc["attendance"] if d >= doc["promotedAt"]]
+# 현재 단계 출석 일수 (현재 벨트는 이력의 마지막 항목)
+since = doc["history"][-1]["date"] if doc["history"] else doc.get("startedAt", "")
+stage = [d for d in doc["attendance"] if d >= since]
 print("현재 단계:", len(stage), "일")
 ```
 
@@ -326,10 +390,10 @@ print("현재 단계:", len(stage), "일")
 
 ```js
 const doc = {
-  belt: 1, stripe: 2,
-  startedAt: "2020-03-01", promotedAt: "2026-06-01",
+  startedAt: "2020-03-01",
   attendance: ["2026-06-02", "2026-06-04"],
-  history: [{ date: "2026-06-01", belt: 1, stripe: 2 }],
+  removed: {},
+  history: [{ date: "2026-06-01", belt: 1, stripe: 2 }],   // ← 현재 = 블루 2그랄
   updatedAt: new Date().toISOString()
 };
 localStorage.setItem("bjj-attendance", JSON.stringify(doc, null, 2));

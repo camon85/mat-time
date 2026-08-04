@@ -16,16 +16,10 @@
 <div class="wrap">
 
   <header>
-    <div style="flex:1;min-width:0">
-      <h1 id="beltTitle">–</h1>
-      <div class="sub" id="beltSub">–</div>
+    <div class="belt-mount belt-lg">
+      <div class="belt-bar" id="beltBar"></div>
     </div>
-    <div class="belt-mount">
-      <div class="belt-bar" id="beltBar">
-        <div class="black-tip"></div>
-        <div class="stripes" id="beltStripes"></div>
-      </div>
-    </div>
+    <div class="sub" id="beltSub">–</div>
   </header>
 
   <!-- 오늘 출석 -->
@@ -41,9 +35,14 @@
 
   <!-- 승급 진행도 -->
   <div class="card">
-    <h2>다음 승급까지</h2>
     <div class="goal-head">
-      <div class="to" id="goalTo">–</div>
+      <div class="goal-next" id="goalBelt">
+        <span class="goal-word">다음</span>
+        <div class="belt-mount belt-sm">
+          <div class="belt-bar" id="goalBeltBar"></div>
+        </div>
+        <span class="goal-word">까지</span>
+      </div>
       <div class="pct" id="goalPct">–</div>
     </div>
 
@@ -80,6 +79,7 @@
       <span><i style="background:var(--accent)"></i>출석</span>
       <span><i style="background:#2c5b41"></i>이전 단계 출석</span>
       <span><i style="background:var(--warn)"></i>승급일</span>
+      <span><i class="leg-cer"></i>승급식(매월 마지막 금)</span>
     </div>
   </div>
 
@@ -96,7 +96,14 @@
 
   <!-- 로드맵 -->
   <div class="card">
-    <h2>블랙벨트까지</h2>
+    <div class="road-head">
+      <div class="belt-mount belt-sm">
+        <div class="belt-bar is-black" id="roadGoalBelt" style="background:#14161a">
+          <div class="black-tip"></div><div class="stripes"></div>
+        </div>
+      </div>
+      <span class="goal-word">까지</span>
+    </div>
     <div class="road-total">
       <span style="font-size:13px;color:var(--muted)" id="roadStep">–</span>
       <span class="pct" id="roadPct">–</span>
@@ -126,29 +133,14 @@
           비워 두면 표시하지 않으며, 승급 진행도 계산에는 쓰이지 않습니다.
         </p>
 
-        <div class="field">
-          <label>벨트</label>
-          <select id="setBelt"></select>
-        </div>
-        <div class="field">
-          <label>그랄</label>
-          <select id="setStripe"></select>
-        </div>
-        <div class="field">
-          <label>단계 시작일</label>
-          <input type="date" id="setPromoted">
-        </div>
-        <p class="hint">
-          단계 시작일 = 지금 벨트·그랄을 받은 날. 이 날짜부터 수련 기간과 출석 일수를 셉니다.
-        </p>
-
         <!-- 승급 기록 — 오늘 받은 것도, 지난 승급도 같은 폼으로 -->
         <div class="sync-box">
           <h2 style="margin-bottom:8px">승급 이력</h2>
           <p class="hint">
-            오늘 받은 그랄·벨트도, 앱을 쓰기 전에 받은 것도 여기서 기록합니다.
-            <b>가장 최근 승급</b>이면 현재 벨트와 단계 시작일이 함께 갱신되고,
-            그보다 이전 날짜면 이력에만 남습니다. 출석 기록은 어느 쪽이든 보존됩니다.
+            <b>현재 벨트·그랄과 단계 시작일은 이 이력에서 나옵니다.</b>
+            가장 최근 기록이 곧 지금 상태이고, 그 날짜부터 다음 승급 기준을 셉니다.
+            지금 벨트를 맞추려면 마지막으로 승급한 날을 기록하세요.
+            항목을 지우면 자동으로 직전 상태로 돌아갑니다. 출석 기록은 그대로 보존됩니다.
           </p>
           <div class="hist" id="histList"></div>
 
@@ -206,7 +198,7 @@
             </div>
             <div class="row-btns">
               <button id="btnConnect">연결</button>
-              <a href="https://github.com/settings/tokens/new?scopes=gist&description=BJJ%20출석%20트래커"
+              <a href="https://github.com/settings/tokens/new?scopes=gist&description=Mat%20Time"
                  target="_blank" rel="noopener"
                  style="color:var(--accent);font-size:13px;align-self:center">토큰 발급 →</a>
             </div>
