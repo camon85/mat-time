@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- 홈 화면에 추가했을 때의 라벨. 없으면 title 전체가 쓰여 잘린다 -->
+<meta name="apple-mobile-web-app-title" content="Mat Time">
+<meta name="application-name" content="Mat Time">
+<title>Mat Time — 주짓수 출석 트래커</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div style="flex:1;min-width:0">
+      <h1 id="beltTitle">–</h1>
+      <div class="sub" id="beltSub">–</div>
+    </div>
+    <div class="belt-mount">
+      <div class="belt-bar" id="beltBar">
+        <div class="black-tip"></div>
+        <div class="stripes" id="beltStripes"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- 오늘 출석 -->
+  <div class="card">
+    <div class="today-row">
+      <div class="today-date">
+        <div class="d" id="todayD">–</div>
+        <div class="w" id="todayW">–</div>
+      </div>
+      <button class="btn-check" id="btnToday">출석 체크</button>
+    </div>
+  </div>
+
+  <!-- 승급 진행도 -->
+  <div class="card">
+    <h2>다음 승급까지</h2>
+    <div class="goal-head">
+      <div class="to" id="goalTo">–</div>
+      <div class="pct" id="goalPct">–</div>
+    </div>
+
+    <div class="metric">
+      <div class="top">
+        <span class="label">수련 기간</span>
+        <span class="val" id="mMonthsVal">–</span>
+      </div>
+      <div class="bar" id="mMonthsBar"><i style="width:0"></i></div>
+      <div class="note" id="mMonthsNote"></div>
+    </div>
+
+    <div class="metric">
+      <div class="top">
+        <span class="label">출석 일수</span>
+        <span class="val" id="mDaysVal">–</span>
+      </div>
+      <div class="bar" id="mDaysBar"><i style="width:0"></i></div>
+      <div class="note" id="mDaysNote"></div>
+    </div>
+
+    <div class="ready" id="readyBox"></div>
+  </div>
+
+  <!-- 캘린더 -->
+  <div class="card">
+    <div class="cal-head">
+      <button id="calPrev" aria-label="이전 달">‹</button>
+      <div class="m" id="calMonth">–</div>
+      <button id="calNext" aria-label="다음 달">›</button>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+    <div class="cal-legend">
+      <span><i style="background:var(--accent)"></i>출석</span>
+      <span><i style="background:#2c5b41"></i>이전 단계 출석</span>
+      <span><i style="background:var(--warn)"></i>승급일</span>
+    </div>
+  </div>
+
+  <!-- 통계 -->
+  <div class="card">
+    <h2>기록</h2>
+    <p class="since" id="startedNote" hidden></p>
+    <div class="stats">
+      <div class="stat"><div class="n" id="stTotal">0</div><div class="l">총 출석</div></div>
+      <div class="stat"><div class="n" id="stMonth">0</div><div class="l">이번 달</div></div>
+      <div class="stat"><div class="n" id="stWeek">0</div><div class="l">최근 4주 평균</div></div>
+    </div>
+  </div>
+
+  <!-- 로드맵 -->
+  <div class="card">
+    <h2>블랙벨트까지</h2>
+    <div class="road-total">
+      <span style="font-size:13px;color:var(--muted)" id="roadStep">–</span>
+      <span class="pct" id="roadPct">–</span>
+    </div>
+    <div class="bar"><i id="roadBar" style="width:0"></i></div>
+    <div class="road-list" id="roadList"></div>
+  </div>
+
+  <!-- 설정 -->
+  <div class="card collapsible">
+    <details id="settings">
+      <summary>
+        <span class="sum-label">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor"
+            d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+          설정 · 승급 이력 · 백업
+        </span>
+        <span class="chev">▶</span>
+      </summary>
+      <div>
+        <div class="field">
+          <label>주짓수 시작일</label>
+          <input type="date" id="setStarted">
+        </div>
+        <p class="hint">
+          처음 도장에 등록한 날. 총 수련 기간을 «기록» 카드에 표시합니다.
+          비워 두면 표시하지 않으며, 승급 진행도 계산에는 쓰이지 않습니다.
+        </p>
+
+        <div class="field">
+          <label>벨트</label>
+          <select id="setBelt"></select>
+        </div>
+        <div class="field">
+          <label>그랄</label>
+          <select id="setStripe"></select>
+        </div>
+        <div class="field">
+          <label>단계 시작일</label>
+          <input type="date" id="setPromoted">
+        </div>
+        <p class="hint">
+          단계 시작일 = 지금 벨트·그랄을 받은 날. 이 날짜부터 수련 기간과 출석 일수를 셉니다.
+        </p>
+
+        <!-- 승급 기록 — 오늘 받은 것도, 지난 승급도 같은 폼으로 -->
+        <div class="sync-box">
+          <h2 style="margin-bottom:8px">승급 이력</h2>
+          <p class="hint">
+            오늘 받은 그랄·벨트도, 앱을 쓰기 전에 받은 것도 여기서 기록합니다.
+            <b>가장 최근 승급</b>이면 현재 벨트와 단계 시작일이 함께 갱신되고,
+            그보다 이전 날짜면 이력에만 남습니다. 출석 기록은 어느 쪽이든 보존됩니다.
+          </p>
+          <div class="hist" id="histList"></div>
+
+          <div class="row-btns" style="margin-top:12px">
+            <button id="btnAddHist">＋ 승급 기록</button>
+          </div>
+
+          <div id="histForm" hidden style="margin-top:14px">
+            <div class="field">
+              <label>승급일</label>
+              <input type="date" id="histDate">
+            </div>
+            <div class="field">
+              <label>받은 벨트</label>
+              <select id="histBelt"></select>
+            </div>
+            <div class="field">
+              <label>받은 그랄</label>
+              <select id="histStripe"></select>
+            </div>
+            <p class="hint" id="histEffect" style="margin-bottom:12px"></p>
+            <div class="row-btns">
+              <button id="btnHistSave">기록</button>
+              <button class="btn-ghost" id="btnHistCancel">취소</button>
+            </div>
+          </div>
+        </div>
+
+
+        <!-- 기기 간 동기화 (GitHub Gist) -->
+        <div class="sync-box">
+          <div class="sync-state" id="syncState"><span class="dot"></span><span id="syncMsg">–</span></div>
+
+          <div id="syncSetup">
+            <p class="hint">
+              지금 출석 기록은 <b>이 브라우저 안에만</b> 있습니다. 브라우저 데이터를 지우거나,
+              폰·PC를 바꾸거나, 다른 브라우저로 열면 기록을 볼 수 없습니다.
+              iOS Safari는 한동안 방문하지 않은 사이트의 저장 데이터를 자동으로 지우기도 합니다.
+            </p>
+            <p class="hint">
+              자동 백업과 기기 간 공유를 하려면 <b>깃허브 계정 연결</b>이 필요합니다.
+              별도 서버 없이, 본인 깃허브 계정의 비공개 Gist 한 개에 기록이 저장됩니다.
+              연결하려면 깃허브에서 <b>개인 토큰</b>을 발급받아야 합니다.
+            </p>
+            <ol class="steps">
+              <li>깃허브에 로그인합니다 (계정이 없으면 먼저 가입).</li>
+              <li>아래 <b>토큰 발급</b> 링크를 엽니다 — <b>gist</b> 권한만 체크된 채로 열립니다.</li>
+              <li>만료 기간을 고르고 <b>Generate token</b>을 눌러 나온 값을 복사합니다.</li>
+              <li>복사한 값을 아래 칸에 붙여넣고 <b>연결</b>을 누릅니다.</li>
+            </ol>
+            <div class="field">
+              <label>깃허브 토큰</label>
+              <input type="password" id="syncToken" placeholder="ghp_..." autocomplete="off"
+                     spellcheck="false">
+            </div>
+            <div class="row-btns">
+              <button id="btnConnect">연결</button>
+              <a href="https://github.com/settings/tokens/new?scopes=gist&description=BJJ%20출석%20트래커"
+                 target="_blank" rel="noopener"
+                 style="color:var(--accent);font-size:13px;align-self:center">토큰 발급 →</a>
+            </div>
+            <p class="hint" style="margin-top:10px">
+              다른 기기에서 같은 토큰을 넣으면 그 Gist를 자동으로 찾아 기록을 이어받습니다.
+              토큰은 <b>gist 권한만</b> 갖고 있어 저장소나 계정 설정에는 접근할 수 없으며,
+              JSON 백업 파일에도 포함되지 않습니다.
+            </p>
+            <p class="hint">
+              연결하지 않고 쓰시려면 아래 <b>백업(JSON)</b>으로 파일을 받아 두세요.
+              기기를 바꿀 때 새 기기에서 <b>복원</b>으로 불러올 수 있습니다.
+            </p>
+          </div>
+
+          <div id="syncActive" hidden>
+            <div class="row-btns">
+              <button id="btnSyncNow">지금 동기화</button>
+              <button class="btn-ghost" id="btnGistOpen">Gist 열기</button>
+              <button class="btn-ghost" id="btnDisconnect">연결 해제</button>
+            </div>
+            <p class="hint" style="margin-top:10px">
+              출석을 체크하면 자동으로 올라갑니다. 두 기기에서 따로 체크한 경우 출석 날짜는 합쳐집니다
+              (한쪽에서 취소한 날짜가 다른 기기 기록에 남아 있으면 되살아날 수 있습니다).
+              벨트·그랄·시작일은 마지막에 수정한 기기 값이 적용됩니다.
+            </p>
+          </div>
+        </div>
+
+        <div class="sync-box">
+          <div class="row-btns">
+            <button class="btn-ghost" id="btnExport">백업 (JSON)</button>
+            <button class="btn-ghost" id="btnImport">복원</button>
+            <input type="file" id="fileImport" accept="application/json,.json" hidden>
+          </div>
+          <p class="hint" style="margin-top:10px">
+            백업 파일에는 깃허브 토큰이 포함되지 않습니다.
+          </p>
+        </div>
+
+        <div class="row-btns" style="margin-top:20px">
+          <button class="btn-danger" id="btnReset">전체 초기화</button>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <p id="footNote" style="text-align:center;font-size:11px;color:#4d5462;margin-top:22px"></p>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

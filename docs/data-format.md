@@ -1,0 +1,338 @@
+# 데이터 포맷 명세
+
+Mat Time(주짓수 출석 트래커)이 저장하는 데이터의 형식과 의미를 정의한다.
+이 문서만 보고도 **다른 앱·스크립트에서 데이터를 읽고 쓰고 다시 계산**할 수 있도록 작성했다.
+
+- 대상 구현: [`../app.js`](../app.js)
+
+---
+
+## 1. 저장 위치
+
+| 위치 | 키 / 파일명 | 내용 |
+|---|---|---|
+| 브라우저 localStorage | `bjj-attendance` | **기록 문서** (아래 §3). 앱의 원본 데이터 |
+| 브라우저 localStorage | `bjj-attendance-sync` | 동기화 설정. **기록과 분리** |
+| 백업 파일 | `bjj-attendance-<YYYY-MM-DD>.json` | 기록 문서를 그대로 내보낸 것 |
+| GitHub Gist (비공개) | `bjj-attendance.json` | 기록 문서. Gist 설명은 `주짓수 출석 트래커 기록` |
+
+localStorage·백업 파일·Gist **세 곳의 내용은 완전히 동일한 형식**이다.
+직렬화는 `JSON.stringify(doc, null, 2)` (들여쓰기 2칸).
+
+### 1.1 동기화 설정 (별도 키)
+
+```json
+{ "token": "ghp_...", "gistId": "abc123...", "lastSync": "2026-08-04T02:00:55.212Z" }
+```
+
+**기록 문서에는 토큰이 절대 포함되지 않는다.** 백업 파일을 공유해도 계정이 노출되지 않는다.
+새 기기에서는 이 값이 없으므로, 토큰을 다시 입력해야 Gist를 찾아 이어받는다.
+
+---
+
+## 2. 공통 규약
+
+- **날짜 문자열**: `YYYY-MM-DD` 형식. **로컬 시간대의 달력 날짜**이며 시각·타임존 정보를 갖지 않는다.
+  UTC 로 해석하면 시간대에 따라 하루가 어긋나므로, 파싱할 때 `new Date("2026-08-04")` 처럼
+  UTC 로 읽히는 방식을 쓰지 말고 연·월·일을 분리해 로컬 날짜로 만들 것.
+  ```js
+  const [y, m, d] = s.split("-").map(Number);
+  const date = new Date(y, m - 1, d);        // 로컬 자정
+  ```
+- **정렬**: 날짜 문자열은 사전순 정렬이 곧 시간순 정렬이다 (`localeCompare` / `<` 비교 가능).
+- **타임스탬프**: `updatedAt` 만 예외로 UTC ISO 8601 (`new Date().toISOString()`).
+
+---
+
+## 3. 기록 문서 스키마
+
+```json
+{
+  "belt": 0,
+  "stripe": 2,
+  "startedAt": "2020-03-01",
+  "promotedAt": "2026-06-01",
+  "attendance": ["2026-08-01", "2026-08-04"],
+  "history": [
+    { "date": "2025-09-10", "belt": 0, "stripe": 1 }
+  ],
+  "updatedAt": "2026-08-04T02:00:28.131Z"
+}
+```
+
+| 필드 | 타입 | 필수 | 의미 |
+|---|---|---|---|
+| `belt` | `0..4` | ✔ | 현재 벨트 (§4) |
+| `stripe` | `0..4` | ✔ | 현재 그랄 수. `belt === 4`(블랙)이면 항상 `0` |
+| `startedAt` | 날짜 \| `""` | ✔ | **주짓수를 처음 시작한 날**. `""` = 미설정. 표시 전용 |
+| `promotedAt` | 날짜 | ✔ | **현재 벨트·그랄을 받은 날** = 현재 단계 시작일. 모든 승급 계산의 기준점 |
+| `attendance` | 날짜[] | ✔ | 출석한 날. 중복 없음, 오름차순 |
+| `history` | 항목[] | ✔ | 승급 이력. `date` 중복 없음, `date` 오름차순 |
+| `updatedAt` | ISO 문자열 \| `""` | ✔ | 마지막 사용자 변경 시각(UTC). 병합 시 승자 판정에 사용 (§7) |
+
+`history` 항목:
+
+| 필드 | 타입 | 의미 |
+|---|---|---|
+| `date` | 날짜 | 승급일 |
+| `belt` | `0..4` | 그날 **받은** 벨트 |
+| `stripe` | `0..4` | 그날 **받은** 그랄 수. `belt === 4`이면 `0` |
+
+> `startedAt` 과 `promotedAt` 은 이름이 비슷하지만 역할이 다르다.
+> `startedAt` 은 총 수련 기간 표시에만 쓰이고 **승급 계산에 관여하지 않는다**.
+
+---
+
+## 4. 벨트·그랄 인코딩
+
+| `belt` | 벨트 | `stripe` 범위 |
+|---|---|---|
+| 0 | 화이트 | 0–4 |
+| 1 | 블루 | 0–4 |
+| 2 | 퍼플 | 0–4 |
+| 3 | 브라운 | 0–4 |
+| 4 | 블랙 | 0 고정 (최종 단계) |
+
+### 4.1 단계 인덱스
+
+화이트 0그랄을 `0`, 블랙을 `20`으로 하는 선형 인덱스. 전체 진행도 계산에 쓴다.
+
+```js
+const MAX_STRIPE = 4, BLACK = 4, TOTAL_STEPS = 20;   // 4 * (4+1)
+
+function stepIndex(belt, stripe) {
+  return belt >= BLACK ? TOTAL_STEPS : belt * (MAX_STRIPE + 1) + stripe;
+}
+```
+
+화이트 0→4그랄이 4단계, 화이트 4그랄→블루 0그랄이 1단계, …
+블랙벨트까지 총 **20단계**다.
+
+---
+
+## 5. 승급 최소 기준
+
+체육관 규정. **수련 기간과 출석 일수를 모두** 충족해야 한다.
+
+| 구간 | 수련 기간 | 출석 일수 |
+|---|---|---|
+| 화이트 0그랄 → 4그랄 (4단계) | 3개월 | 30일 |
+| 화이트 4그랄 → 블루, 이후 블랙까지 (16단계) | 7개월 | 90일 |
+
+```js
+function requirement(belt, stripe) {
+  if (belt >= BLACK) return null;                          // 블랙 = 최종
+  return (belt === 0 && stripe < MAX_STRIPE)
+    ? { months: 3, days: 30 }
+    : { months: 7, days: 90 };
+}
+
+function next(belt, stripe) {
+  if (belt >= BLACK) return { belt, stripe: 0 };
+  return stripe < MAX_STRIPE ? { belt, stripe: stripe + 1 } : { belt: belt + 1, stripe: 0 };
+}
+```
+
+---
+
+## 6. 파생 계산
+
+문서에는 **원본 사실만** 저장하고, 아래 값은 모두 읽는 쪽에서 계산한다.
+
+### 6.1 현재 단계 출석 일수
+
+`promotedAt` 이상 오늘 이하인 출석만 센다. 승급해도 과거 출석은 지우지 않으므로 필터가 필요하다.
+
+```js
+const stageDays = doc.attendance.filter(k => k >= doc.promotedAt && k <= todayKey).length;
+```
+
+### 6.2 개월 수 — 말일 보정에 주의
+
+"3개월"은 30일·90일이 아니라 **달력 기준**이다. 1/31 + 1개월은 2/28(윤년 2/29)로 잘라야 한다.
+
+```js
+function addMonths(d, n) {
+  const t = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  const last = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  t.setDate(Math.min(d.getDate(), last));         // 말일 넘침 방지
+  return t;
+}
+
+// 기간 조건 충족 여부
+const targetDate = addMonths(parseDate(doc.promotedAt), req.months);
+const monthsMet = today >= targetDate;
+```
+
+진행률 표시용 소수 개월:
+
+```js
+function monthsElapsed(from, to) {
+  if (to <= from) return 0;
+  let m = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+  if (addMonths(from, m) > to) m--;
+  const prev = addMonths(from, m), nxt = addMonths(from, m + 1);
+  return m + (to - prev) / (nxt - prev);           // 정수 개월 + 잔여 비율
+}
+```
+
+### 6.3 진행률
+
+두 조건을 **모두** 만족해야 승급이므로, 종합 진행률은 **둘 중 낮은 쪽**이다.
+
+```js
+const monthsPct = clamp01(monthsElapsed(from, today) / req.months);
+const daysPct   = clamp01(stageDays / req.days);
+const stagePct  = Math.min(monthsPct, daysPct);              // 현재 단계 진행률
+const totalPct  = (stepIndex(doc.belt, doc.stripe) + stagePct) / TOTAL_STEPS;
+```
+
+### 6.4 총 수련 기간
+
+`startedAt` 이 비어 있지 않을 때만. 한 달 미만이면 일 단위로 표시한다.
+
+---
+
+## 7. 병합 규칙 (동기화)
+
+두 기기의 문서를 합칠 때 필드별로 규칙이 다르다.
+
+| 필드 | 규칙 | 이유 |
+|---|---|---|
+| `attendance` | **합집합** | 양쪽에서 체크한 날을 모두 살린다 |
+| `history` | `date` 를 키로 한 **합집합** | 같은 날짜는 한쪽 값으로 덮어씀 |
+| `startedAt` | **더 이른 날짜** (빈 값은 무시) | 시작일은 가장 이른 기록이 진실. 한쪽에만 있어도 지워지지 않음 |
+| `belt`, `stripe`, `promotedAt` | `updatedAt` 이 **더 최신인 쪽** | 마지막에 수정한 기기의 상태를 따름 |
+| `updatedAt` | 위에서 이긴 쪽의 값 | |
+
+```js
+function merge(a, b) {
+  const newer = (b.updatedAt || "") > (a.updatedAt || "") ? b : a;
+  const histByDate = new Map();
+  [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
+  return {
+    belt: newer.belt, stripe: newer.stripe, promotedAt: newer.promotedAt,
+    startedAt: [a.startedAt, b.startedAt].filter(Boolean).sort()[0] || "",
+    attendance: [...new Set([...a.attendance, ...b.attendance])].sort(),
+    history: [...histByDate.values()].sort((x, y) => x.date.localeCompare(y.date)),
+    updatedAt: newer.updatedAt || ""
+  };
+}
+```
+
+### 7.1 알려진 한계 — 출석 취소가 되살아난다
+
+합집합이므로 **삭제가 전파되지 않는다.** A기기에서 출석을 취소해도 B기기에 그 날짜가 남아 있으면
+다음 동기화에서 복구된다. 취소는 드문 동작이라 단순함을 택한 설계상의 트레이드오프다.
+
+이 데이터를 쓰는 다른 앱에서 **삭제까지 정확히 동기화하려면** 삭제 기록(tombstone)을 추가해야 한다.
+예: `"deleted": ["2026-07-15"]` 를 두고 합집합에서 차집합하는 방식.
+그런 필드를 추가해도 이 앱은 `normalize()` 에서 모르는 필드를 버리므로 **깨지지 않는다** (§9).
+
+### 7.2 덮어쓰기가 필요한 경우
+
+초기화·백업 복원은 병합하면 지운 데이터가 되돌아온다. 이때는 병합 없이 원격을 **덮어쓴다**.
+
+---
+
+## 8. 불변식
+
+앱이 저장한 문서라면 아래는 항상 참이다. 읽는 쪽에서 믿어도 된다.
+
+1. `attendance` 는 중복이 없고 오름차순이다
+2. `history` 는 `date` 가 유일하고 오름차순이다
+3. `belt` 는 `0..4`, `stripe` 는 `0..4`, `belt === 4`면 `stripe === 0`
+4. 모든 날짜 필드는 `YYYY-MM-DD` 이거나 (`startedAt` 한정) `""` 이다
+5. `promotedAt` 은 항상 존재한다 (미설정 개념이 없다)
+
+**보장하지 않는 것** — 사용자가 설정에서 자유롭게 고칠 수 있으므로 아래는 가정하면 안 된다.
+
+- `startedAt <= promotedAt` 일 것 (역전 가능)
+- `history` 의 마지막 항목이 `promotedAt`·`belt`·`stripe` 와 일치할 것
+  (이력을 비워둔 채 현재 상태만 설정할 수 있다)
+- `history` 의 벨트 순서가 단조증가할 것 (사용자가 임의 순서로 기록 가능)
+- 출석 날짜가 `startedAt` 이후일 것
+
+---
+
+## 9. 관용적 파싱 (`normalize`)
+
+앱은 불러온 문서를 검증하지 않고 **보정**한다. 손으로 만든 파일도 안전하게 읽힌다.
+
+| 입력 | 처리 |
+|---|---|
+| 모르는 필드 | **버림** (확장 필드를 넣어도 앱은 깨지지 않지만, 저장 시 사라짐) |
+| `belt`/`stripe` 가 범위 밖·숫자 아님 | `0..4` 로 clamp, 숫자가 아니면 `0` |
+| `belt === 4` 인데 `stripe > 0` | `stripe = 0` 으로 강제 |
+| `attendance` 의 형식 위반 문자열 | 개별 제거 후 중복 제거·정렬 |
+| `history` 의 `date` 형식 위반 항목 | 항목 제거. 남은 것은 날짜 기준 중복 제거·정렬 |
+| `promotedAt` 누락·형식 위반 | **오늘 날짜**로 대체 |
+| `startedAt` 형식 위반 | `""` (미설정) |
+| `attendance`/`history` 가 배열이 아님 | 빈 배열 |
+
+즉 **최소 문서는 `{}` 이며**, 이것만 넣어도 "오늘 시작한 화이트 0그랄"로 해석된다.
+
+---
+
+## 10. 형식 변경
+
+지금은 **버전 필드를 두지 않는다.** 최초 릴리즈 전이라 구분할 과거 버전이 없기 때문이다.
+
+앞으로 형식을 바꿀 때 지킬 것.
+
+- **필드 추가**는 아무 표시도 필요 없다. 모르는 필드는 `normalize()` 가 버리므로 구버전 앱이 깨지지 않는다
+- **의미 변경·필드 제거**처럼 호환되지 않는 변경이 생기면 그때 `version` 필드를 도입한다.
+  `version` 이 없는 문서는 **최초 형식**으로 간주하면 된다
+- 그런 변경이 실제로 필요해지면 localStorage 키도 함께 바꾸고(`bjj-attendance-2` 등)
+  기존 키에서 한 번만 옮겨오는 편이 안전하다
+
+## 11. 크기·성능 특성
+
+실측값 (Chromium, 데스크톱). `render()` 는 전체 화면 재구성 1회 기준.
+
+| 시나리오 | 출석 일수 | JSON 크기 | 압축 시 | render | 캘린더 | 출석 토글 | 병합 |
+|---|---|---|---|---|---|---|---|
+| 주 3회 × 10년 | 1,566 | 29.2 KB | 20.8 KB | 1.3 ms | 0.4 ms | 0.6 ms | 0.2 ms |
+| 주 5회 × 10년 | 2,609 | 47.5 KB | 34.1 KB | 0.8 ms | 0.4 ms | 0.9 ms | 0.2 ms |
+| 매일 × 10년 | 3,653 | 65.9 KB | 47.3 KB | 1.0 ms | 0.5 ms | 1.9 ms | 0.3 ms |
+| 매일 × 30년 | 10,958 | 194.3 KB | 140.1 KB | 2.4 ms | 1.3 ms | 2.9 ms | 1.0 ms |
+
+관련 한계선:
+
+- **Gist API 응답 잘림**: 파일 1 MB 초과 시 `truncated: true` 가 되고 본문 대신 `raw_url` 을 받아야 한다.
+  30년치가 194 KB 이므로 도달하려면 **150년 이상** 필요하다. 앱은 잘림도 이미 처리한다
+- **localStorage 할당량**: 브라우저당 보통 5 MB. 30년치가 0.2 MB
+- 출석 배열이 커져도 렌더가 선형으로만 늘어나며, 실사용 규모에서 체감 지연은 없다
+
+---
+
+## 12. 다른 도구에서 읽기
+
+### Python — 월별 출석 집계
+
+```python
+import json, collections
+doc = json.load(open("bjj-attendance-2026-08-04.json"))
+by_month = collections.Counter(d[:7] for d in doc["attendance"])
+for m, n in sorted(by_month.items()):
+    print(m, n)
+
+# 현재 단계 출석 일수
+stage = [d for d in doc["attendance"] if d >= doc["promotedAt"]]
+print("현재 단계:", len(stage), "일")
+```
+
+### JavaScript — 최소 문서 만들기
+
+```js
+const doc = {
+  belt: 1, stripe: 2,
+  startedAt: "2020-03-01", promotedAt: "2026-06-01",
+  attendance: ["2026-06-02", "2026-06-04"],
+  history: [{ date: "2026-06-01", belt: 1, stripe: 2 }],
+  updatedAt: new Date().toISOString()
+};
+localStorage.setItem("bjj-attendance", JSON.stringify(doc, null, 2));
+```
+
+앱의 **복원** 기능에 이 JSON 파일을 넣어도 동일하게 반영된다.
