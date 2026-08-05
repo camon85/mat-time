@@ -22,14 +22,20 @@
     <div class="sub" id="beltSub">–</div>
   </header>
 
-  <!-- 오늘 출석 -->
+  <!-- 캘린더 -->
   <div class="card">
-    <div class="today-row">
-      <div class="today-date">
-        <div class="d" id="todayD">–</div>
-        <div class="w" id="todayW">–</div>
-      </div>
-      <button class="btn-check" id="btnToday">출석 체크</button>
+    <div class="cal-head">
+      <button id="calPrev" aria-label="이전 달">‹</button>
+      <div class="m" id="calMonth">–</div>
+      <button id="calNext" aria-label="다음 달">›</button>
+    </div>
+    <p class="today-line" id="todayLine"></p>
+    <div class="cal-grid" id="calGrid"></div>
+    <div class="cal-legend">
+      <span><i style="background:var(--accent)"></i>출석</span>
+      <span><i style="background:#2c5b41"></i>이전 단계 출석</span>
+      <span><i style="background:var(--warn)"></i>승급일</span>
+      <span><i class="leg-cer"></i>승급식(매월 마지막 금)</span>
     </div>
   </div>
 
@@ -67,30 +73,31 @@
     <div class="ready" id="readyBox"></div>
   </div>
 
-  <!-- 캘린더 -->
-  <div class="card">
-    <div class="cal-head">
-      <button id="calPrev" aria-label="이전 달">‹</button>
-      <div class="m" id="calMonth">–</div>
-      <button id="calNext" aria-label="다음 달">›</button>
-    </div>
-    <div class="cal-grid" id="calGrid"></div>
-    <div class="cal-legend">
-      <span><i style="background:var(--accent)"></i>출석</span>
-      <span><i style="background:#2c5b41"></i>이전 단계 출석</span>
-      <span><i style="background:var(--warn)"></i>승급일</span>
-      <span><i class="leg-cer"></i>승급식(매월 마지막 금)</span>
-    </div>
-  </div>
-
   <!-- 통계 -->
   <div class="card">
     <h2>기록</h2>
     <p class="since" id="startedNote" hidden></p>
     <div class="stats">
-      <div class="stat"><div class="n" id="stTotal">0</div><div class="l">총 출석</div></div>
-      <div class="stat"><div class="n" id="stMonth">0</div><div class="l">이번 달</div></div>
-      <div class="stat"><div class="n" id="stWeek">0</div><div class="l">최근 4주 평균</div></div>
+      <div class="stat">
+        <div class="n"><span id="stTotal">0</span><span class="u">회</span></div>
+        <div class="l">총 출석</div>
+      </div>
+      <div class="stat" id="stStreakBox">
+        <div class="n"><span id="stStreak">0</span><span class="u">주</span></div>
+        <div class="l"><i class="wkdot"></i>연속</div>
+      </div>
+      <div class="stat">
+        <div class="n"><span id="stPace">0.0</span><span class="u">회</span></div>
+        <div class="l">최근 4주 주당</div>
+      </div>
+    </div>
+    <p class="pace" id="paceNote"></p>
+    <div class="heat" id="heatGrid" aria-hidden="true"></div>
+    <div class="heat-legend">
+      <span id="heatSpan">최근 1년</span>
+      <span><i class="sw"></i>없음</span>
+      <span><i class="sw on"></i>출석</span>
+      <span><i class="sw promo"></i>승급</span>
     </div>
   </div>
 
@@ -104,11 +111,6 @@
       </div>
       <span class="goal-word">까지</span>
     </div>
-    <div class="road-total">
-      <span style="font-size:13px;color:var(--muted)" id="roadStep">–</span>
-      <span class="pct" id="roadPct">–</span>
-    </div>
-    <div class="bar"><i id="roadBar" style="width:0"></i></div>
     <div class="road-list" id="roadList"></div>
   </div>
 
@@ -126,7 +128,7 @@
       <div>
         <div class="field">
           <label>주짓수 시작일</label>
-          <input type="date" id="setStarted">
+          <input type="text" id="setStarted" class="datefield" readonly placeholder="선택 안 함">
         </div>
         <p class="hint">
           처음 도장에 등록한 날. 총 수련 기간을 «기록» 카드에 표시합니다.
@@ -151,7 +153,7 @@
           <div id="histForm" hidden style="margin-top:14px">
             <div class="field">
               <label>승급일</label>
-              <input type="date" id="histDate">
+              <input type="text" id="histDate" class="datefield" readonly placeholder="날짜 선택">
             </div>
             <div class="field">
               <label>받은 벨트</label>
@@ -246,6 +248,23 @@
   </div>
 
   <p id="footNote" style="text-align:center;font-size:11px;color:#4d5462;margin-top:22px"></p>
+</div>
+
+<div class="picker-back" id="pickerBack" hidden></div>
+<div class="picker" id="picker" hidden role="dialog" aria-label="날짜 선택">
+  <div class="picker-head">
+    <button type="button" data-nav="-12" aria-label="1년 전">«</button>
+    <button type="button" data-nav="-1" aria-label="한 달 전">‹</button>
+    <div class="picker-title" id="pickerTitle"></div>
+    <button type="button" data-nav="1" aria-label="한 달 뒤">›</button>
+    <button type="button" data-nav="12" aria-label="1년 뒤">»</button>
+  </div>
+  <div class="cal-grid" id="pickerGrid"></div>
+  <div class="picker-foot">
+    <button type="button" id="pickerToday">오늘</button>
+    <button type="button" class="btn-ghost" id="pickerClear">지우기</button>
+    <button type="button" class="btn-ghost" id="pickerClose">닫기</button>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>

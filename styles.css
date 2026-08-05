@@ -89,12 +89,7 @@ header .sub { font-size: 12px; color: var(--muted); }
 .belt-xs .belt-bar .stripe { width: 2px; }
 .belt-xs { padding: 2px; border-radius: 5px; }
 
-/* ---------- 오늘 출석 ---------- */
-.today-row { display: flex; align-items: center; gap: 12px; }
-.today-date { flex: 1; }
-.today-date .d { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
-.today-date .w { font-size: 12px; color: var(--muted); }
-
+/* ---------- 버튼 ---------- */
 button {
   font: inherit; color: inherit; cursor: pointer;
   border: 1px solid var(--line); background: var(--surface-2);
@@ -102,14 +97,6 @@ button {
 }
 button:active { transform: scale(0.97); }
 button:disabled { opacity: .4; cursor: default; }
-
-.btn-check {
-  border: none; border-radius: 12px; padding: 14px 22px;
-  font-size: 16px; font-weight: 700; letter-spacing: -0.2px;
-  background: var(--accent); color: var(--accent-deep); min-width: 130px;
-}
-.btn-check.done { background: var(--accent-dim); color: var(--accent);
-                  border: 1px solid var(--accent-line); }
 .btn-ghost { background: transparent; }
 .btn-danger { color: var(--danger); border-color: #4a2626; background: transparent; }
 
@@ -147,6 +134,9 @@ button:disabled { opacity: .4; cursor: default; }
 .cal-head { display: flex; align-items: center; justify-content: space-between;
             margin-bottom: 12px; }
 .cal-head .m { font-size: 15px; font-weight: 700; }
+.today-line { font-size: 12.5px; margin: -4px 0 10px; color: var(--muted); }
+.today-line b { color: var(--text); font-weight: 700; }
+.today-line .yes { color: var(--accent); font-weight: 700; }
 .cal-head button { padding: 6px 11px; font-size: 14px; }
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .cal-grid .dow { text-align: center; font-size: 11px; color: var(--muted); padding: 4px 0 6px; }
@@ -163,7 +153,7 @@ button:disabled { opacity: .4; cursor: default; }
 .day.blank { background: transparent; border: none; pointer-events: none; }
 .day.future { opacity: .3; pointer-events: none; }
 .day.on { background: var(--accent); color: var(--accent-deep); font-weight: 700; }
-.day.today { border-color: var(--muted); }
+.day.today { border-color: var(--accent); border-width: 2px; font-weight: 700; }
 .day.today.on { border-color: #ffffff; }
 .day.before-promo:not(.on) { background: #14171d; color: #5a6270; }
 .day.before-promo.on { background: var(--accent-line); color: #a7f3c8; }
@@ -187,13 +177,44 @@ button:disabled { opacity: .4; cursor: default; }
 .stat { background: var(--surface-2); border-radius: 10px; padding: 12px 10px; text-align: center; }
 .stat .n { font-size: 20px; font-weight: 800; letter-spacing: -0.5px;
            font-variant-numeric: tabular-nums; }
-.stat .l { font-size: 11px; color: var(--muted); margin-top: 3px; }
+/* 단위는 작고 흐리게 — 라벨을 안 읽어도 "58주"인지 "58회"인지 바로 읽힌다 */
+.stat .n .u { font-size: 11.5px; font-weight: 600; color: var(--muted); margin-left: 1px; }
+.stat .l { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap;
+           display: flex; align-items: center; justify-content: center; gap: 4px; }
+
+/* 연속만 "끊길 수 있는" 값이다 — 이번 주 확보 여부를 점으로 알린다 */
+.wkdot { width: 6px; height: 6px; border-radius: 99px; background: var(--muted);
+         flex-shrink: 0; opacity: .5; }
+.stat.week-done .wkdot { background: var(--accent); opacity: 1; }
+.stat.week-done .l { color: var(--accent); }
+
+/* 페이스 — 남은 양이 아니라 "지금 잘하고 있는지"를 말해준다 */
+.pace { font-size: 12.5px; color: var(--muted); margin: 12px 0 0; line-height: 1.7; }
+.pace b { color: var(--text); font-weight: 700; }
+.pace .up { color: var(--accent); font-weight: 700; }
+.pace .down { color: var(--warn); font-weight: 700; }
+
+/* 잔디 — 1년치 출석. 진행률과 달리 되돌아가지 않는 누적 기록이다 */
+.heat {
+  display: grid; grid-template-rows: repeat(7, 1fr); grid-auto-flow: column;
+  gap: 2px; margin-top: 16px;
+}
+.heat i { aspect-ratio: 1 / 1; border-radius: 1.5px; background: var(--surface-2); }
+.heat i.on { background: var(--accent); }
+.heat i.promo { background: var(--warn); }
+.heat i.future { background: transparent; }
+.heat-legend {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  margin-top: 9px; font-size: 11px; color: var(--muted);
+}
+.heat-legend span { display: flex; align-items: center; gap: 5px; }
+.sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
+      background: var(--surface-2); }
+.sw.on { background: var(--accent); }
+.sw.promo { background: var(--warn); }
 
 /* ---------- 로드맵 ---------- */
-.road-total { display: flex; align-items: baseline; justify-content: space-between;
-              margin-bottom: 10px; }
-.road-total .pct { font-size: 20px; font-weight: 800; }
-.road-list { margin-top: 16px; }
+.road-list { margin-top: 4px; }
 .road-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
 .road-row > .belt-mount { flex-shrink: 0; opacity: .55; transition: opacity .15s; }
 .road-row.cur > .belt-mount { opacity: 1; }
@@ -202,14 +223,34 @@ button:disabled { opacity: .4; cursor: default; }
   flex: 1; height: 9px; border-radius: 3px; background: var(--surface-2);
   border: 1px solid var(--line);
 }
-.road-dots i.done { background: var(--accent); border-color: var(--accent); }
-.road-dots i.cur { background: var(--warn); border-color: var(--warn); }
+.road-dots i.done,
+.road-dots i.cur { background: var(--accent); border-color: var(--accent); }
 .road-row .rq { font-size: 10.5px; color: #5f6775; width: 62px; text-align: right; flex-shrink: 0; }
 
 /* ---------- 설정 ---------- */
 .field { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .field label { width: 92px; font-size: 13px; color: var(--muted); flex-shrink: 0; }
-select, input[type="date"], input[type="password"] {
+.datefield { cursor: pointer; }
+.datefield::placeholder { color: var(--muted); }
+
+/* 자체 날짜 선택기 — 네이티브 달력은 시작 요일을 바꿀 수 없어 직접 그린다 */
+.picker-back {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 60;
+}
+.picker {
+  position: fixed; z-index: 61; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(340px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px; box-shadow: 0 16px 40px rgba(0,0,0,.5);
+}
+.picker-head { display: flex; align-items: center; gap: 4px; margin-bottom: 10px; }
+.picker-head button { padding: 5px 9px; font-size: 13px; }
+.picker-title { flex: 1; text-align: center; font-size: 14px; font-weight: 700; }
+.picker-foot { display: flex; gap: 8px; margin-top: 12px; }
+.picker-foot button { font-size: 13px; flex: 1; }
+.picker .day { font-size: 13px; }
+
+select, input[type="text"], input[type="password"] {
   font: inherit; color: var(--text); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; flex: 1;
   min-width: 0;

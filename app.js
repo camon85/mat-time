@@ -313,15 +313,17 @@ function renderBelt() {
 }
 
 function renderToday() {
-  const t = today();
-  const k = key(t);
-  $("todayD").textContent = `${t.getFullYear()}. ${t.getMonth() + 1}. ${t.getDate()}.`;
-  $("todayW").textContent = DOW[t.getDay()] + "요일";
-
-  const btn = $("btnToday");
+  const t = today(), k = key(t);
   const done = hasAttended(k);
-  btn.textContent = done ? "✓ 출석함" : "출석 체크";
-  btn.classList.toggle("done", done);
+  $("todayLine").innerHTML = done
+    ? `오늘 <b>${t.getMonth() + 1}/${t.getDate()}(${DOW[t.getDay()]})</b> · <span class="yes">출석 완료</span>`
+    : `오늘 <b>${t.getMonth() + 1}/${t.getDate()}(${DOW[t.getDay()]})</b> · 아직 체크 전 — 아래에서 오늘 날짜를 누르세요`;
+}
+
+/** 최근 4주 실제 페이스 (주당 출석 횟수) */
+function recentPerWeek() {
+  const t = today();
+  return state.attendance.filter(k => k >= key(addDays(t, -27)) && k <= key(t)).length / 4;
 }
 
 function renderGoal() {
@@ -388,16 +390,31 @@ function renderGoal() {
   $("goalPct").textContent = Math.floor(Math.min(monthsPct, daysPct) * 100) + "%";
 
   const box = $("readyBox");
-  const cer = `${fmtMD(ceremony)} 승급식`;
   if (monthsOk && daysOk) {
     box.className = "ready";
-    box.innerHTML = `✅ 기준 충족 · <b>${cer}</b> D-${dCeremony}`;
+    box.innerHTML = `✅ 기준 충족 · <b>${fmtMD(ceremony)} 승급식</b> D-${dCeremony}`;
   } else {
     box.className = "ready wait";
     const parts = [];
     if (!monthsOk) parts.push(`기간 D-${dLeft}`);
     if (!daysOk) parts.push(`출석 ${remain}일 부족`);
-    box.innerHTML = `${parts.join(" · ")} · 빠르면 <b>${cer}</b>`;
+
+    // 이론상 최단(하루 1회)과 실제 페이스를 나란히 — 벌어진 폭이 곧 경고다
+    const perWeek = recentPerWeek();
+    const fast = `빠르면 <b>${fmtMD(ceremony)}</b>`;
+    let tail;
+    if (remain <= 0) {
+      tail = fast;
+    } else if (perWeek <= 0) {
+      tail = `${fast} · 최근 출석이 없어 페이스 예측 불가`;
+    } else {
+      const paceCer = ceremonyOnOrAfter(
+        new Date(Math.max(targetDate, addDays(t, Math.ceil(remain / perWeek * 7)))));
+      tail = key(paceCer) === key(ceremony)
+        ? `${fast} · 지금 페이스로도 동일`
+        : `${fast} · 이 페이스면 <b>${fmtMD(paceCer)}</b>`;
+    }
+    box.innerHTML = `${parts.join(" · ")}<br>승급식 — ${tail}`;
   }
 }
 
@@ -492,32 +509,92 @@ function renderStats() {
     note.innerHTML = `주짓수 시작 ${state.startedAt} · <b>${fmtSpan(state.startedAt)}</b>`;
   }
 
+  // 세 칸의 성격을 겹치지 않게 — 누적 / 유지 / 속도
   $("stTotal").textContent = state.attendance.length;
+  $("stStreak").textContent = weeklyStreak();
+  $("stPace").textContent = recentPerWeek().toFixed(1);
 
-  const prefix = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}`;
-  $("stMonth").textContent = state.attendance.filter(k => k.startsWith(prefix)).length;
+  // 라벨 칸은 좁아 두 줄로 접힌다 — 점만 두고 설명은 아래 페이스 줄에서 한다
+  $("stStreakBox").classList.toggle("week-done", attendedThisWeek());
 
-  const from = key(addDays(t, -27));
-  const recent = state.attendance.filter(k => k >= from && k <= key(t)).length;
-  $("stWeek").textContent = (recent / 4).toFixed(1);
+  const thisMonth = state.attendance.filter(k => k.slice(0, 7) === key(t).slice(0, 7)).length;
+  renderPace(thisMonth);
+  renderHeatmap();
+}
+
+/** 이번 주(일~토)에 한 번이라도 나갔는지 */
+function attendedThisWeek() {
+  const t = today();
+  const ws = addDays(t, -t.getDay());
+  for (let i = 0; i < 7; i++) if (state.attendance.includes(key(addDays(ws, i)))) return true;
+  return false;
+}
+
+/**
+ * 주 단위 연속 출석. 주짓수는 매일 하는 운동이 아니라 일 단위 연속을 쓰면
+ * 하루만 쉬어도 0이 되어 오히려 의욕을 꺾는다. 주(일~토)에 한 번이라도 나갔으면 이어진 것으로 본다.
+ * 이번 주는 아직 안 갔을 수 있으므로 끊긴 것으로 치지 않는다.
+ */
+function weeklyStreak() {
+  const set = new Set(state.attendance);
+  const hasIn = ws => {
+    for (let i = 0; i < 7; i++) if (set.has(key(addDays(ws, i)))) return true;
+    return false;
+  };
+  const t = today();
+  let ws = addDays(t, -t.getDay());          // 이번 주 일요일
+  if (!hasIn(ws)) ws = addDays(ws, -7);
+  let n = 0;
+  while (hasIn(ws)) { n++; ws = addDays(ws, -7); }
+  return n;
+}
+
+/** 지난달 같은 기간과 비교한다. 승급식 예측은 진행도 카드가 맡는다 */
+function renderPace(thisMonth) {
+  const t = today();
+
+  // 이번 달은 아직 진행 중이므로 지난달 "같은 날짜까지"와 비교해야 공평하다
+  const lastFrom = key(new Date(t.getFullYear(), t.getMonth() - 1, 1));
+  const lastTo = key(addMonths(t, -1));
+  const lastSame = state.attendance.filter(k => k >= lastFrom && k <= lastTo).length;
+  const diff = thisMonth - lastSame;
+  const mark = diff > 0 ? `<span class="up">+${diff}</span>`
+             : diff < 0 ? `<span class="down">${diff}</span>` : "±0";
+
+  const week = attendedThisWeek()
+    ? `이번 주 <span class="up">출석 완료</span>`
+    : `이번 주 <b>아직</b>`;
+  $("paceNote").innerHTML =
+    `이번 달 <b>${thisMonth}회</b> · 지난달 같은 기간 대비 ${mark}<br>${week}`;
+}
+
+/** 최근 1년 출석 잔디. 열 = 주(일~토), 행 = 요일 */
+function renderHeatmap() {
+  const WEEKS = 53;
+  const grid = $("heatGrid");
+  grid.innerHTML = "";
+
+  const t = today();
+  const end = addDays(t, 6 - t.getDay());              // 이번 주 토요일
+  const start = addDays(end, -(WEEKS * 7 - 1));        // 53주 전 일요일
+  const on = new Set(state.attendance);
+  const promo = new Set(state.history.map(h => h.date));
+
+  for (let i = 0; i < WEEKS * 7; i++) {
+    const d = addDays(start, i);
+    const dk = key(d);
+    const cell = document.createElement("i");
+    cell.className = d > t ? "future" : promo.has(dk) ? "promo" : on.has(dk) ? "on" : "";
+    cell.title = dk;
+    grid.appendChild(cell);
+  }
+  const shown = state.attendance.filter(k => k >= key(start) && k <= key(t)).length;
+  $("heatSpan").textContent = `${key(start).slice(0, 7)} ~ ${key(t).slice(0, 7)} · ${shown}회`;
 }
 
 function renderRoadmap() {
-  const { belt, stripe, since } = currentRank();
-  const req = requirementOf(belt, stripe);
+  const { belt, stripe } = currentRank();
   const step = stepIndexOf(belt, stripe);
-
-  let inStep = 0;
-  if (req) {
-    const mPct = clamp(monthsElapsed(parseKey(since), today()) / req.months, 0, 1);
-    const dPct = clamp(currentStageDays() / req.days, 0, 1);
-    inStep = Math.min(mPct, dPct);
-  }
-  const total = clamp((step + inStep) / TOTAL_STEPS, 0, 1);
-
-  $("roadStep").textContent = `${step} / ${TOTAL_STEPS} 단계`;
-  $("roadPct").textContent = (total * 100).toFixed(1) + "%";
-  $("roadBar").style.width = (total * 100).toFixed(1) + "%";
 
   const list = $("roadList");
   list.innerHTML = "";
@@ -570,7 +647,6 @@ function renderRoadmap() {
 
 function renderSettings() {
   $("setStarted").value = state.startedAt;
-  $("setStarted").max = key(today());
   // 승급 기록 폼의 셀렉트는 한 번만 채운다
   const hb = $("histBelt");
   if (!hb.options.length) {
@@ -578,7 +654,6 @@ function renderSettings() {
     const hs = $("histStripe");
     for (let i = 0; i <= MAX_STRIPE; i++) hs.add(new Option(i + "그랄", i));
   }
-  $("histDate").max = key(today());
   $("histStripe").disabled = Number(hb.value) >= BLACK;
 
   renderHistory();
@@ -971,11 +1046,94 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
 }
 
+
+/* ============================================================
+   날짜 선택기 — 네이티브 date 입력은 시작 요일을 브라우저 로케일이 정해
+   바꿀 수 없다. 출석 달력과 같은 일요일 시작으로 맞추려고 직접 만든다.
+   ============================================================ */
+
+let pickerTarget = null;      // 값을 채울 input
+let pickerCursor = today();   // 보고 있는 달
+
+function openPicker(input) {
+  pickerTarget = input;
+  const v = input.value;
+  pickerCursor = /^\d{4}-\d{2}-\d{2}$/.test(v) ? parseKey(v) : today();
+  $("pickerClear").hidden = input.dataset.clearable !== "1";
+  $("picker").hidden = false;
+  $("pickerBack").hidden = false;
+  renderPicker();
+}
+
+function closePicker() {
+  $("picker").hidden = true;
+  $("pickerBack").hidden = true;
+  pickerTarget = null;
+}
+
+function commitPicker(value) {
+  if (!pickerTarget) return;
+  pickerTarget.value = value;
+  pickerTarget.dispatchEvent(new Event("change"));
+  closePicker();
+}
+
+function renderPicker() {
+  const y = pickerCursor.getFullYear(), m = pickerCursor.getMonth();
+  $("pickerTitle").textContent = `${y}년 ${m + 1}월`;
+
+  const grid = $("pickerGrid");
+  grid.innerHTML = "";
+  DOW.forEach((w, i) => {                       // 출석 달력과 동일하게 일요일부터
+    const el = document.createElement("div");
+    el.className = "dow" + (i === 0 ? " sun" : i === 6 ? " sat" : "");
+    el.textContent = w;
+    grid.appendChild(el);
+  });
+
+  const first = new Date(y, m, 1);
+  const lastDate = new Date(y, m + 1, 0).getDate();
+  const tk = key(today());
+  const sel = pickerTarget ? pickerTarget.value : "";
+
+  for (let i = 0; i < first.getDay(); i++) {
+    const b = document.createElement("div");
+    b.className = "day blank";
+    grid.appendChild(b);
+  }
+  for (let d = 1; d <= lastDate; d++) {
+    const dk = key(new Date(y, m, d));
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const cls = ["day"];
+    if (dk === sel) cls.push("on");
+    if (dk === tk) cls.push("today");
+    if (dk > tk) cls.push("future");            // 미래는 어차피 거부되므로 막는다
+    btn.className = cls.join(" ");
+    btn.textContent = d;
+    btn.onclick = () => commitPicker(dk);
+    grid.appendChild(btn);
+  }
+}
+
 /* ============================================================
    이벤트 바인딩
    ============================================================ */
 
-$("btnToday").onclick = () => toggleDay(key(today()));
+$("setStarted").dataset.clearable = "1";        // 주짓수 시작일은 비울 수 있다
+[$("setStarted"), $("histDate")].forEach(inp => { inp.onclick = () => openPicker(inp); });
+$("picker").querySelectorAll("[data-nav]").forEach(b => {
+  b.onclick = () => {
+    pickerCursor = addMonths(new Date(pickerCursor.getFullYear(), pickerCursor.getMonth(), 1),
+                             Number(b.dataset.nav));
+    renderPicker();
+  };
+});
+$("pickerToday").onclick = () => commitPicker(key(today()));
+$("pickerClear").onclick = () => commitPicker("");
+$("pickerClose").onclick = closePicker;
+$("pickerBack").onclick = closePicker;
+document.addEventListener("keydown", e => { if (e.key === "Escape") closePicker(); });
 
 $("calPrev").onclick = () => {
   calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() - 1, 1);
