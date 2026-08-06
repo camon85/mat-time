@@ -189,16 +189,22 @@ button:disabled { opacity: .4; cursor: default; }
 .cal-legend span { display: flex; align-items: center; gap: 5px; }
 .cal-legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 
-.card-head { display: flex; align-items: center; justify-content: space-between; }
-.card-head h2 { margin-bottom: 12px; }
+/*
+ * 아래 여백은 헤더가 직접 갖는다. h2 에 margin 을 두면 flex 가 마진까지 포함해 정렬해서
+ * 글자만 위로 밀리고, 그 여백이 사라지는 조건(시작일 미설정)에서 stats 가 딱 붙는다.
+ */
+.card-head { display: flex; align-items: center; justify-content: space-between;
+             margin-bottom: 8px; }
+.card-head h2 { margin: 0; }
 .icon-btn { padding: 6px 9px; line-height: 0; color: var(--muted); }
 .icon-btn:hover { color: var(--text); }
 .icon-btn .ico { width: 16px; height: 16px; }
 
 /* ---------- 통계 ---------- */
-.since { font-size: 12.5px; color: var(--muted); margin: -4px 0 12px; }
+/* 아래 여백은 stats 가 갖는다 — 이 줄이 숨어도 간격이 유지되도록 */
+.since { font-size: 12.5px; color: var(--muted); margin: 0; }
 .since b { color: var(--text); font-weight: 700; }
-.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
 .stat { background: var(--surface-2); border-radius: 10px; padding: 12px 10px; text-align: center; }
 .stat .n { font-size: 20px; font-weight: 800; letter-spacing: -0.5px;
            font-variant-numeric: tabular-nums; }
