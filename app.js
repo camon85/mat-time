@@ -37,13 +37,6 @@ function nextOf(belt, stripe) {
   return stripe < MAX_STRIPE ? { belt, stripe: stripe + 1 } : { belt: belt + 1, stripe: 0 };
 }
 
-/** 한글 조사 이/가 선택 — 받침 유무로 갈린다 ("그랄이" vs "블랙벨트가") */
-function subjectParticle(word) {
-  const c = word.charCodeAt(word.length - 1);
-  const hangul = c >= 0xac00 && c <= 0xd7a3;
-  return hangul && (c - 0xac00) % 28 !== 0 ? "이" : "가";
-}
-
 function labelOf(belt, stripe) {
   if (belt >= BLACK) return "블랙벨트";
   return BELTS[belt].name + " " + stripe + "그랄";
@@ -106,10 +99,13 @@ let state = {
   attendance: [],       // "YYYY-MM-DD" 배열 (정렬·중복 제거 유지)
   removed: {},          // 출석을 취소한 날짜 → 취소 시각(ISO). 다시 체크하면 키 삭제
   history: [],          // { date, belt, stripe } — 승급 이력. 날짜 오름차순
-  updatedAt: ""         // ISO 문자열. 병합 시 승자 판정 기준
+  removedHistory: {},   // 삭제한 승급일 → 삭제 시각(ISO). 없으면 동기화가 삭제를 되살린다
+  updatedAt: "",        // ISO 문자열. 병합 시 승자 판정 기준
+  epoch: 0              // 복원·초기화 세대. 항목별 툼스톤으로 표현할 수 없는 "전체 교체"를 나타낸다
 };
 
 let calCursor = today();   // 캘린더가 보고 있는 달
+let form = { belt: 0, stripe: 1 };   // 승급 기록 폼에서 고른 벨트·그랄
 
 /** 현재 벨트·그랄과 그 단계가 시작된 날. 이력이 비면 화이트 0그랄 */
 function currentRank() {
@@ -132,17 +128,23 @@ function load() {
   }
 }
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 function normalize(d) {
-  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const att = Array.isArray(d.attendance)
     ? [...new Set(d.attendance.filter(s => typeof s === "string" && DATE_RE.test(s)))].sort()
     : [];
-  const rem = {};
-  if (d.removed && typeof d.removed === "object" && !Array.isArray(d.removed)) {
-    for (const [k, v] of Object.entries(d.removed)) {
-      if (DATE_RE.test(k) && typeof v === "string" && v) rem[k] = v;
+  const stamps = src => {
+    const o = {};
+    if (src && typeof src === "object" && !Array.isArray(src)) {
+      for (const [k, v] of Object.entries(src)) {
+        if (DATE_RE.test(k) && typeof v === "string" && v) o[k] = v;
+      }
     }
-  }
+    return o;
+  };
+  const rem = stamps(d.removed);
+  const remHist = stamps(d.removedHistory);
   // 날짜를 키로 중복 제거 + 오름차순 정렬 — 손으로 만든 파일을 불러와도 불변식이 유지된다
   const hist = Array.isArray(d.history)
     ? [...new Map(d.history
@@ -158,8 +160,10 @@ function normalize(d) {
     startedAt: DATE_RE.test(d.startedAt) ? d.startedAt : "",
     attendance: att.filter(k => !rem[k]),
     removed: rem,
-    history: hist,
-    updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : ""
+    history: hist.filter(h => !remHist[h.date]),
+    removedHistory: remHist,
+    updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : "",
+    epoch: Number.isInteger(d.epoch) && d.epoch >= 0 ? d.epoch : 0
   };
 }
 
@@ -218,11 +222,14 @@ function fmtShort(k) {
   return (d.getMonth() + 1) + "/" + d.getDate();
 }
 
-/** 현재 단계(승급일 이후)의 출석 일수 */
+/**
+ * 현재 단계의 출석 일수.
+ * 승급식 당일 출석은 이전 단계의 마지막 수련으로 보고, 다음 날부터 새 단계로 센다.
+ */
 function currentStageDays() {
   const from = currentRank().since;
   const to = key(today());
-  return state.attendance.filter(k => k >= from && k <= to).length;
+  return state.attendance.filter(k => k > from && k <= to).length;
 }
 
 /* ============================================================
@@ -304,12 +311,13 @@ function renderBelt() {
   const { belt, stripe, since } = currentRank();
   paintBelt($("beltBar"), belt, stripe);
 
-  // 승급 이력이 없으면 "승급"이 아니라 "시작"이다
-  const word = state.history.length ? "승급" : "시작";
   const days = daysBetween(parseKey(since), today());
-  $("beltSub").textContent = days >= 0
-    ? `${since} ${word} · ${days}일째`
-    : `${since} ${word} 예정`;
+  if (!state.history.length) {
+    // 화이트 0그랄은 승급이 아니라 시작 상태다. 날짜는 「기록」 카드가 이미 보여주므로 중복을 피한다
+    $("beltSub").textContent = days > 0 ? `수련 ${days}일째` : "오늘 시작";
+  } else {
+    $("beltSub").textContent = days >= 0 ? `${since} 승급 · ${days}일째` : `${since} 승급 예정`;
+  }
 }
 
 function renderToday() {
@@ -450,35 +458,42 @@ function renderCalendar() {
     grid.appendChild(el);
   });
 
-  const first = new Date(y, m, 1);
-  const lastDate = new Date(y, m + 1, 0).getDate();
   const tk = key(today());
   const since = currentRank().since;
-  const ceremonyK = key(lastFridayOf(y, m));      // 이 달의 승급식
+  const ceremonyK = key(lastFridayOf(y, m));
+  const promo = new Set(state.history.map(h => h.date));
 
-  for (let i = 0; i < first.getDay(); i++) {
-    const b = document.createElement("div");
-    b.className = "day blank";
-    grid.appendChild(b);
-  }
+  /*
+   * 항상 6주(42칸)를 그린다. 달마다 5주·6주로 높이가 바뀌면 월을 연속으로 넘길 때
+   * 아래 내용이 밀려 오조작이 난다. 앞뒤 빈칸은 이웃 달 날짜로 채워 일반 달력처럼 보이게 하되,
+   * 흐리게 처리하고 누를 수 없게 해서 다른 달을 잘못 찍는 일을 막는다.
+   */
+  const first = new Date(y, m, 1);
+  const gridStart = addDays(first, -first.getDay());          // 1일이 속한 주의 일요일
 
-  for (let d = 1; d <= lastDate; d++) {
-    const dk = key(new Date(y, m, d));
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(gridStart, i);
+    const dk = key(d);
+    const other = d.getMonth() !== m;
     const btn = document.createElement("button");
+    btn.type = "button";
+
     const cls = ["day"];
+    if (other) cls.push("other");
     if (hasAttended(dk)) cls.push("on");
     if (dk === tk) cls.push("today");
     if (dk > tk) cls.push("future");
-    if (dk < since) cls.push("before-promo");
+    if (dk <= since) cls.push("before-promo");                // 승급식 당일까지가 이전 단계
     if (dk === ceremonyK) cls.push("ceremony");
     btn.className = cls.join(" ");
-    btn.textContent = d;
-    if (state.history.some(h => h.date === dk)) {
+    btn.textContent = d.getDate();
+
+    if (promo.has(dk)) {
       const dot = document.createElement("span");
       dot.className = "promo-dot";
       btn.appendChild(dot);
     }
-    btn.onclick = () => toggleDay(dk);
+    if (!other) btn.onclick = () => toggleDay(dk);
     grid.appendChild(btn);
   }
 
@@ -647,15 +662,7 @@ function renderRoadmap() {
 
 function renderSettings() {
   $("setStarted").value = state.startedAt;
-  // 승급 기록 폼의 셀렉트는 한 번만 채운다
-  const hb = $("histBelt");
-  if (!hb.options.length) {
-    BELTS.forEach((b, i) => hb.add(new Option(b.name, i)));
-    const hs = $("histStripe");
-    for (let i = 0; i <= MAX_STRIPE; i++) hs.add(new Option(i + "그랄", i));
-  }
-  $("histStripe").disabled = Number(hb.value) >= BLACK;
-
+  renderForm();
   renderHistory();
   renderHistEffect();
 }
@@ -691,19 +698,75 @@ function renderHistory() {
   });
 }
 
+/**
+ * 승급 기록 폼의 벨트·그랄 선택지를 그린다.
+ * 선택된 벨트 칩은 고른 그랄까지 함께 보여주므로 따로 미리보기를 둘 필요가 없다.
+ */
+function renderForm() {
+  const bc = $("beltChoices");
+  bc.innerHTML = "";
+  BELTS.forEach((b, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "belt-choice" + (i === form.belt ? " sel" : "");
+    btn.title = b.name;
+    btn.appendChild(beltEl(i, i === form.belt ? form.stripe : 0, "belt-xs"));
+    btn.onclick = () => setFormBelt(i);
+    bc.appendChild(btn);
+  });
+
+  const isBlack = form.belt >= BLACK;
+  $("stripeRow").hidden = isBlack;
+  const sc = $("stripeChoices");
+  sc.innerHTML = "";
+  if (isBlack) return;
+  // 화이트 0그랄은 승급이 아니라 시작 상태이므로 1부터
+  for (let i = (form.belt === 0 ? 1 : 0); i <= MAX_STRIPE; i++) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "stripe-choice" + (i === form.stripe ? " sel" : "");
+    btn.textContent = i;
+    btn.onclick = () => { form.stripe = i; renderForm(); renderHistEffect(); };
+    sc.appendChild(btn);
+  }
+}
+
+function setFormBelt(belt) {
+  form.belt = belt;
+  if (belt >= BLACK) form.stripe = 0;
+  else if (belt === 0 && form.stripe === 0) form.stripe = 1;
+  renderForm();
+  renderHistEffect();
+}
+
 /** 폼에 입력된 값이 현재 상태를 바꾸는지 미리 알려준다 */
 function renderHistEffect() {
   const el = $("histEffect");
   if (!el) return;
-  const date = $("histDate").value;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { el.textContent = "승급일을 선택하세요."; return; }
-  if (parseKey(date) > today()) { el.textContent = "미래 날짜는 기록할 수 없습니다."; return; }
+  const show = html => { el.innerHTML = html; el.hidden = !html; };
 
-  const belt = clamp(Number($("histBelt").value), 0, BLACK);
-  const stripe = belt >= BLACK ? 0 : clamp(Number($("histStripe").value), 0, MAX_STRIPE);
-  el.innerHTML = becomesCurrent(date)
-    ? `현재 벨트가 <b>${labelOf(belt, stripe)}</b>${subjectParticle(labelOf(belt, stripe))} 되고, 이 날부터 다음 승급 기준을 셉니다.`
-    : `더 최근 승급(${currentRank().since})이 있어 <b>이력에만</b> 남습니다.`;
+  const date = $("histDate").value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return show("승급일을 선택하세요.");
+  if (parseKey(date) > today()) return show("미래 날짜는 기록할 수 없습니다.");
+
+  // 누르기 전에 알 수 있도록, 같은 등급이 이미 있으면 먼저 알린다
+  const { belt, stripe } = form;
+  const same = sameRankEntry(belt, stripe, date);
+  if (same) {
+    return show(`이미 ${same.date}에 <b>${labelOf(belt, stripe)}</b> 기록이 있습니다. ` +
+                `기록하면 승급일을 옮길지 묻습니다.`);
+  }
+
+  // 가장 최근 승급이 되는 건 당연한 경우이고 벨트 칩이 이미 결과를 보여준다.
+  // 예외(더 최근 기록이 있어 이력에만 남는 경우)만 알린다.
+  show(becomesCurrent(date)
+    ? ""
+    : `더 최근 승급(${currentRank().since})이 있어 <b>이력에만</b> 남습니다.`);
+}
+
+/** 같은 등급이 다른 날짜에 이미 기록돼 있으면 그 항목 */
+function sameRankEntry(belt, stripe, exceptDate) {
+  return state.history.find(h => h.belt === belt && h.stripe === stripe && h.date !== exceptDate);
 }
 
 /** 이 승급일이 가장 최근이 되는지 — 그러면 현재 벨트가 이 기록으로 바뀐다 */
@@ -721,6 +784,7 @@ function putHistory(rec) {
   state.history = state.history.filter(h => h.date !== rec.date);
   state.history.push(rec);
   state.history.sort((a, b) => a.date.localeCompare(b.date));
+  delete state.removedHistory[rec.date];      // 다시 기록하면 삭제 표시를 지운다
 }
 
 /**
@@ -730,18 +794,27 @@ function putHistory(rec) {
  */
 function recordPromotion() {
   const date = $("histDate").value;
-  const belt = clamp(Number($("histBelt").value), 0, BLACK);
-  const stripe = belt >= BLACK ? 0 : clamp(Number($("histStripe").value), 0, MAX_STRIPE);
+  const { belt, stripe } = form;
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast("승급일을 선택하세요"); return; }
   if (parseKey(date) > today()) { toast("미래 날짜는 기록할 수 없습니다"); return; }
+  if (belt === 0 && stripe === 0) { toast("화이트 0그랄은 승급이 아니라 시작 상태입니다"); return; }
   const dup = state.history.find(h => h.date === date);
   if (dup && !confirm(`${date}에 이미 ${labelOf(dup.belt, dup.stripe)} 기록이 있습니다. 바꿀까요?`)) return;
+
+  // 같은 등급은 두 번 받을 수 없다 — 새로 쌓지 말고 승급일을 옮길지 묻는다
+  const same = sameRankEntry(belt, stripe, date);
+  if (same) {
+    if (!confirm(`이미 ${same.date}에 ${labelOf(belt, stripe)} 기록이 있습니다.\n` +
+                 `승급일을 ${date}로 옮길까요?`)) return;
+    state.history = state.history.filter(h => h.date !== same.date);
+    state.removedHistory[same.date] = new Date().toISOString();   // 동기화에도 반영
+  }
 
   const current = becomesCurrent(date);
   putHistory({ date, belt, stripe });
   save();
-  $("histForm").hidden = true;
+  toggleHistForm(false);
   render();
   toast(current
     ? `🎉 ${labelOf(belt, stripe)} 축하합니다!`
@@ -753,6 +826,7 @@ function deleteHistory(date) {
   if (!rec) return;
   if (!confirm(`${date} · ${labelOf(rec.belt, rec.stripe)} 기록을 삭제합니다.`)) return;
   state.history = state.history.filter(h => h.date !== date);
+  state.removedHistory[date] = new Date().toISOString();
   save();
   render();
   toast("기록을 삭제했습니다");
@@ -768,21 +842,118 @@ function exportData() {
   toast("백업 파일을 저장했습니다");
 }
 
+/*
+ * 백업 파일 검증 — 전부 받아들이거나 전부 거부한다.
+ *
+ * normalize() 는 우리가 쓴 데이터를 읽기 위한 관용적 파서라 아무 JSON 이나 통과시켜
+ * 기본값으로 만들어 버린다. 남의 JSON 을 넣으면 기록이 지워지고 Gist 까지 덮어쓴다.
+ * 게다가 일부만 걸러 받으면 "무엇이 사라졌는지" 사용자가 알기 어렵다.
+ * 그래서 항목 하나라도 형식에 맞지 않으면 파일 전체를 받지 않는다.
+ */
+const BACKUP_FIELDS = {
+  startedAt:      v => typeof v === "string",
+  attendance:     v => Array.isArray(v),
+  removed:        v => v && typeof v === "object" && !Array.isArray(v),
+  history:        v => Array.isArray(v),
+  removedHistory: v => v && typeof v === "object" && !Array.isArray(v),
+  updatedAt:      v => typeof v === "string",
+  epoch:          v => Number.isInteger(v) && v >= 0
+};
+
+const isRank = v => Number.isInteger(v) && v >= 0 && v <= MAX_STRIPE;
+
+/** 시각 도장 맵({날짜: ISO})이 온전한지 */
+function badStampMap(m, name) {
+  for (const [k, v] of Object.entries(m)) {
+    if (!DATE_RE.test(k)) return `${name} 의 키 "${k}" 가 날짜 형식이 아닙니다.`;
+    if (typeof v !== "string" || !v) return `${name}["${k}"] 의 값이 비어 있습니다.`;
+  }
+  return null;
+}
+
+/** 문제가 있으면 사유 문자열, 없으면 null */
+function validateBackup(d) {
+  if (!d || typeof d !== "object" || Array.isArray(d)) return "JSON 객체가 아닙니다.";
+
+  const known = Object.keys(BACKUP_FIELDS).filter(k => k in d);
+  if (!known.length) return "Mat Time 백업 파일이 아닙니다 (아는 항목이 하나도 없습니다).";
+  const badType = known.filter(k => !BACKUP_FIELDS[k](d[k]));
+  if (badType.length) return `항목 형식이 올바르지 않습니다 — ${badType.join(", ")}`;
+
+  const att = d.attendance || [], hist = d.history || [];
+  const rem = d.removed || {}, remHist = d.removedHistory || {};
+
+  if (d.startedAt && !DATE_RE.test(d.startedAt))
+    return `startedAt "${d.startedAt}" 이 날짜 형식이 아닙니다.`;
+
+  for (const x of att) {
+    if (typeof x !== "string" || !DATE_RE.test(x))
+      return `attendance 에 날짜가 아닌 값이 있습니다 — ${JSON.stringify(x)}`;
+  }
+  if (new Set(att).size !== att.length) return "attendance 에 중복된 날짜가 있습니다.";
+
+  for (const h of hist) {
+    if (!h || typeof h !== "object" || Array.isArray(h))
+      return "history 에 객체가 아닌 항목이 있습니다.";
+    if (!DATE_RE.test(h.date))
+      return `history 의 date "${h.date}" 가 날짜 형식이 아닙니다.`;
+    if (!isRank(h.belt) || h.belt > BLACK)
+      return `history[${h.date}].belt 값이 0~${BLACK} 범위의 정수가 아닙니다.`;
+    if (!isRank(h.stripe))
+      return `history[${h.date}].stripe 값이 0~${MAX_STRIPE} 범위의 정수가 아닙니다.`;
+    if (h.belt >= BLACK && h.stripe !== 0)
+      return `history[${h.date}] — 블랙벨트에는 그랄이 없습니다.`;
+  }
+  const hDates = hist.map(h => h.date);
+  if (new Set(hDates).size !== hDates.length) return "history 에 중복된 승급일이 있습니다.";
+
+  const stampErr = badStampMap(rem, "removed") || badStampMap(remHist, "removedHistory");
+  if (stampErr) return stampErr;
+
+  const dupA = att.find(k => k in rem);
+  if (dupA) return `${dupA} 이 attendance 와 removed 양쪽에 있습니다.`;
+  const dupH = hDates.find(k => k in remHist);
+  if (dupH) return `${dupH} 이 history 와 removedHistory 양쪽에 있습니다.`;
+
+  return null;
+}
+
 function importData(file) {
   const r = new FileReader();
+  r.onerror = () => alert("파일을 읽지 못했습니다.");
   r.onload = () => {
+    let data;
     try {
-      const data = JSON.parse(r.result);
-      if (!data || typeof data !== "object") throw new Error("형식 오류");
-      if (!confirm("현재 데이터를 백업 파일 내용으로 덮어씁니다. 계속할까요?")) return;
-      state = normalize(data);
-      calCursor = today();
-      saveOverwrite();
-      render();
-      toast("복원 완료 · 출석 " + state.attendance.length + "일");
+      data = JSON.parse(r.result);
     } catch (e) {
-      alert("복원 실패: 올바른 백업 파일이 아닙니다.");
+      alert("복원 실패 — JSON 형식이 아닙니다.\n기존 기록은 그대로 두었습니다.");
+      return;
     }
+
+    const problem = validateBackup(data);
+    if (problem) {
+      alert("복원 실패 — " + problem + "\n파일 전체를 받지 않았습니다. 기존 기록은 그대로입니다.");
+      return;
+    }
+
+    // 검증을 통과했으므로 normalize 가 버리는 항목은 없다
+    const next = normalize(data);
+    const lines = [
+      "불러올 내용",
+      `· 출석 ${next.attendance.length}일`,
+      `· 승급 이력 ${next.history.length}건`
+    ];
+    if (next.startedAt) lines.push(`· 주짓수 시작일 ${next.startedAt}`);
+    lines.push("", `현재 기록(출석 ${state.attendance.length}일 · 이력 ${state.history.length}건)을 덮어씁니다. 계속할까요?`);
+    if (!confirm(lines.join("\n"))) return;
+
+    // 이전 세대보다 반드시 커야 다른 기기의 옛 데이터를 이긴다
+    next.epoch = Math.max(state.epoch, next.epoch) + 1;
+    state = next;
+    calCursor = today();
+    saveOverwrite();
+    render();
+    toast(`복원 완료 · 출석 ${state.attendance.length}일`);
   };
   r.readAsText(file);
 }
@@ -791,7 +962,9 @@ function resetAll() {
   const extra = syncOn() ? "\n연결된 Gist의 기록도 함께 비워집니다." : "";
   if (!confirm("모든 출석 기록과 벨트 정보를 지웁니다. 되돌릴 수 없습니다." + extra)) return;
   if (!confirm("정말 초기화할까요?")) return;
-  state = normalize({ promotedAt: key(today()) });
+  const prevEpoch = state.epoch;
+  state = normalize({});
+  state.epoch = prevEpoch + 1;
   calCursor = today();
   saveOverwrite();
   render();
@@ -851,23 +1024,41 @@ async function gh(path, opts = {}) {
  * (변경 직후 곧바로 push 하므로 충분히 근사하다).
  */
 function mergeStates(a, b) {
+  /*
+   * 복원·초기화는 "지금부터 이 문서가 진실"이라는 선언이다. 항목별 툼스톤으로는
+   * 다른 기기에만 있는 데이터까지 무효로 만들 수 없어, 그 기기가 동기화하면
+   * 지웠던 것이 전부 되살아난다. 그래서 세대가 다르면 병합하지 않고 높은 쪽을 통째로 쓴다.
+   */
+  if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
+
+  /*
+   * 출석과 승급 이력 모두 같은 규칙 — 날짜마다 켠 시각 vs 끈 시각을 비교해 늦은 쪽.
+   * 존재 확인은 반드시 Set 으로 한다. 배열 includes 를 날짜마다 부르면 O(n²) 이 되어
+   * 10년치에서 수십 ms, 30년치에서 수백 ms 가 걸린다.
+   */
+  const pick = (keysOf, tombOf) => {
+    const sa = new Set(keysOf(a)), sb = new Set(keysOf(b));
+    const ta = tombOf(a), tb = tombOf(b);
+    const kept = [], tombs = {};
+    for (const d of new Set([...sa, ...sb, ...Object.keys(ta), ...Object.keys(tb)])) {
+      const sideOf = (s, set, t) => t[d] ? { on: false, at: t[d] }
+                                  : set.has(d) ? { on: true, at: s.updatedAt || "" }
+                                  : null;
+      const x = sideOf(a, sa, ta), y = sideOf(b, sb, tb);
+      const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
+      if (!win) continue;
+      if (win.on) kept.push(d); else tombs[d] = win.at;
+    }
+    return { kept, tombs };
+  };
+
+  const att = pick(s => s.attendance, s => s.removed);
+  const his = pick(s => s.history.map(h => h.date), s => s.removedHistory);
+
   const histByDate = new Map();
   [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
 
-  const dates = new Set([...a.attendance, ...b.attendance,
-                         ...Object.keys(a.removed), ...Object.keys(b.removed)]);
-  const attendance = [], removed = {};
-  for (const d of dates) {
-    // 각 문서가 이 날짜에 대해 주장하는 (상태, 시각)
-    const sideOf = s => s.removed[d] ? { on: false, at: s.removed[d] }
-                      : s.attendance.includes(d) ? { on: true, at: s.updatedAt || "" }
-                      : null;
-    const x = sideOf(a), y = sideOf(b);
-    const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
-    if (!win) continue;
-    if (win.on) attendance.push(d);
-    else removed[d] = win.at;
-  }
+  const attendance = att.kept, removed = att.tombs;
 
   return {
     // 시작일은 "가장 이른 기록"이 진실이므로 최신 우선이 아니라 최소값을 쓴다
@@ -875,13 +1066,16 @@ function mergeStates(a, b) {
     attendance: attendance.sort(),
     removed,
     // 벨트·단계 시작일은 이력에서 파생되므로 이력만 합치면 된다
-    history: [...histByDate.values()].sort((x, y) => x.date.localeCompare(y.date)),
-    updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt
+    history: his.kept.map(d => histByDate.get(d)).sort((x, y) => x.date.localeCompare(y.date)),
+    removedHistory: his.tombs,
+    updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt,
+    epoch: a.epoch
   };
 }
 
 function sameState(a, b) {
-  const norm = s => JSON.stringify([s.startedAt, s.attendance, s.removed, s.history]);
+  const norm = s => JSON.stringify([s.epoch, s.startedAt, s.attendance, s.removed,
+                                    s.history, s.removedHistory]);
   return norm(a) === norm(b);
 }
 
@@ -1091,27 +1285,26 @@ function renderPicker() {
     grid.appendChild(el);
   });
 
-  const first = new Date(y, m, 1);
-  const lastDate = new Date(y, m + 1, 0).getDate();
   const tk = key(today());
   const sel = pickerTarget ? pickerTarget.value : "";
 
-  for (let i = 0; i < first.getDay(); i++) {
-    const b = document.createElement("div");
-    b.className = "day blank";
-    grid.appendChild(b);
-  }
-  for (let d = 1; d <= lastDate; d++) {
-    const dk = key(new Date(y, m, d));
+  // 출석 달력과 같은 이유로 항상 6주. 팝오버는 가운데 정렬이라 높이가 변하면 위아래로 흔들린다
+  const first = new Date(y, m, 1);
+  const gridStart = addDays(first, -first.getDay());
+
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(gridStart, i);
+    const dk = key(d);
     const btn = document.createElement("button");
     btn.type = "button";
     const cls = ["day"];
+    if (d.getMonth() !== m) cls.push("other");
     if (dk === sel) cls.push("on");
     if (dk === tk) cls.push("today");
-    if (dk > tk) cls.push("future");            // 미래는 어차피 거부되므로 막는다
+    if (dk > tk) cls.push("future");             // 미래는 어차피 거부되므로 막는다
     btn.className = cls.join(" ");
-    btn.textContent = d;
-    btn.onclick = () => commitPicker(dk);
+    btn.textContent = d.getDate();
+    if (d.getMonth() === m && dk <= tk) btn.onclick = () => commitPicker(dk);
     grid.appendChild(btn);
   }
 }
@@ -1156,28 +1349,29 @@ $("setStarted").onchange = e => {
   save(); render();
 };
 
-$("btnAddHist").onclick = () => {
+/** 열림/닫힘이 버튼에서 보이도록 라벨과 상태를 함께 바꾼다 */
+function toggleHistForm(open) {
   const f = $("histForm");
-  f.hidden = !f.hidden;
-  if (!f.hidden) {
-    // 기본값: 오늘 + 다음 그랄/벨트. 지난 승급이면 날짜만 바꾸면 된다
-    const cur = currentRank();
-    const nx = nextOf(cur.belt, cur.stripe);
-    $("histDate").value = key(today());
-    $("histBelt").value = nx.belt;
-    $("histStripe").value = nx.stripe;
-    $("histStripe").disabled = nx.belt >= BLACK;
-    renderHistEffect();
-  }
-};
-$("histDate").onchange = renderHistEffect;
-$("histStripe").onchange = renderHistEffect;
-$("histBelt").onchange = e => {
-  $("histStripe").disabled = Number(e.target.value) >= BLACK;
+  f.hidden = !open;
+  const btn = $("btnAddHist");
+  btn.textContent = open ? "✕ 닫기" : "＋ 승급 기록";
+  btn.classList.toggle("open", open);
+  btn.setAttribute("aria-expanded", String(open));
+  if (!open) return;
+
+  // 기본값: 오늘 + 다음 그랄/벨트. 지난 승급이면 날짜만 바꾸면 된다
+  const cur = currentRank();
+  const nx = nextOf(cur.belt, cur.stripe);
+  $("histDate").value = key(today());
+  form = { belt: nx.belt, stripe: nx.stripe };
+  renderForm();
   renderHistEffect();
-};
+}
+
+$("btnAddHist").onclick = () => toggleHistForm($("histForm").hidden);
+$("histDate").onchange = renderHistEffect;
 $("btnHistSave").onclick = recordPromotion;
-$("btnHistCancel").onclick = () => { $("histForm").hidden = true; };
+$("btnHistCancel").onclick = () => toggleHistForm(false);
 
 $("btnExport").onclick = exportData;
 $("btnImport").onclick = () => $("fileImport").click();

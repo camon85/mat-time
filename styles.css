@@ -98,6 +98,9 @@ button {
 button:active { transform: scale(0.97); }
 button:disabled { opacity: .4; cursor: default; }
 .btn-ghost { background: transparent; }
+/* 토글 버튼이 열려 있음을 배경으로 알린다 */
+#btnAddHist.open { background: var(--accent-dim); border-color: var(--accent-line);
+                   color: var(--accent); }
 .btn-danger { color: var(--danger); border-color: #4a2626; background: transparent; }
 
 /* ---------- 진행도 ---------- */
@@ -161,6 +164,16 @@ button:disabled { opacity: .4; cursor: default; }
 .day.ceremony.on { box-shadow: none; }
 .leg-cer { width: 10px; height: 10px; border-radius: 3px; display: inline-block;
            box-shadow: inset 0 0 0 1px var(--warn); background: var(--surface-2); }
+/*
+ * 이웃 달 날짜 — 자리만 채우는 용도. 숫자만 흐리게 남기고 배경·테두리는 전부 지운다.
+ * 채움을 남기면 흐려진 녹색이 「이전 단계 출석」과 구분되지 않는다.
+ * .day.today.on 등과 명시도가 같으므로 반드시 그 뒤에 와야 이긴다.
+ */
+.cal-grid .day.other {
+  background: transparent; border-color: transparent; box-shadow: none;
+  color: var(--text); font-weight: 400; opacity: .28; pointer-events: none;
+}
+
 .day .promo-dot {
   position: absolute; top: 3px; right: 4px; width: 5px; height: 5px;
   border-radius: 99px; background: var(--warn);
@@ -255,6 +268,26 @@ select, input[type="text"], input[type="password"] {
   border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; flex: 1;
   min-width: 0;
 }
+
+/* 승급 기록 폼 — 셀렉트 대신 벨트를 직접 고른다 */
+.pickrow { margin-bottom: 14px; }
+.picklabel { font-size: 13px; color: var(--muted); margin-bottom: 7px; }
+
+.belt-choices { display: flex; gap: 6px; }
+.belt-choice {
+  flex: 1; padding: 4px 3px; border-radius: 8px;
+  background: transparent; border: 1px solid transparent;
+}
+.belt-choice .belt-mount { opacity: .4; transition: opacity .12s; margin: 0 auto; }
+.belt-choice .belt-bar { width: 100%; height: 12px; }
+.belt-choice.sel { border-color: var(--accent-line); background: var(--accent-dim); }
+.belt-choice.sel .belt-mount { opacity: 1; }
+
+.stripe-choices { display: flex; gap: 6px; }
+.stripe-choice { flex: 1; padding: 8px 0; font-size: 13px; text-align: center;
+                 font-variant-numeric: tabular-nums; }
+.stripe-choice.sel { background: var(--accent-dim); border-color: var(--accent-line);
+                     color: var(--accent); font-weight: 700; }
 
 .sync-box { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
 .sync-state { display: flex; align-items: center; gap: 7px; font-size: 13px; margin-bottom: 10px; }

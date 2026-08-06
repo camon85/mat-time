@@ -147,7 +147,7 @@
           <div class="hist" id="histList"></div>
 
           <div class="row-btns" style="margin-top:12px">
-            <button id="btnAddHist">＋ 승급 기록</button>
+            <button id="btnAddHist" aria-expanded="false">＋ 승급 기록</button>
           </div>
 
           <div id="histForm" hidden style="margin-top:14px">
@@ -155,13 +155,13 @@
               <label>승급일</label>
               <input type="text" id="histDate" class="datefield" readonly placeholder="날짜 선택">
             </div>
-            <div class="field">
-              <label>받은 벨트</label>
-              <select id="histBelt"></select>
+            <div class="pickrow">
+              <div class="picklabel">받은 벨트</div>
+              <div class="belt-choices" id="beltChoices"></div>
             </div>
-            <div class="field">
-              <label>받은 그랄</label>
-              <select id="histStripe"></select>
+            <div class="pickrow" id="stripeRow">
+              <div class="picklabel">받은 그랄</div>
+              <div class="stripe-choices" id="stripeChoices"></div>
             </div>
             <p class="hint" id="histEffect" style="margin-bottom:12px"></p>
             <div class="row-btns">
