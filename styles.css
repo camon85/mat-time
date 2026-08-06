@@ -98,9 +98,15 @@ button {
 button:active { transform: scale(0.97); }
 button:disabled { opacity: .4; cursor: default; }
 .btn-ghost { background: transparent; }
-/* 토글 버튼이 열려 있음을 배경으로 알린다 */
-#btnAddHist.open { background: var(--accent-dim); border-color: var(--accent-line);
-                   color: var(--accent); }
+/* 입력 중임이 드러나도록 폼을 한 덩어리로 감싼다 */
+#histForm {
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px;
+}
+#histForm .pickrow:last-of-type { margin-bottom: 10px; }
+/* 주 동작은 하나뿐이라는 게 보이게 */
+#btnHistSave { background: var(--accent); color: var(--accent-deep);
+               border-color: var(--accent); font-weight: 700; }
 .btn-danger { color: var(--danger); border-color: #4a2626; background: transparent; }
 
 /* ---------- 진행도 ---------- */

@@ -23,6 +23,16 @@ const FONT = '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretend
 
 const font = (size, weight) => `${weight || 400} ${size}px ${FONT}`;
 
+// 카드 문구 — 바꾸고 싶으면 여기만 고치면 된다
+const TAGLINE = "꾸준함이 벨트를 만든다";
+function spanLine() {
+  const from = parseKey(state.startedAt), t = today();
+  if (from > t) return "곧 시작";                 // 시작일을 미래로 넣은 경우
+  const d = daysBetween(from, t);
+  if (d === 0) return "오늘 첫 수련";              // "0일째 땀 흘리는 중" 을 막는다
+  return `${fmtSpan(state.startedAt)} 땀 흘리는 중`;
+}
+
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -101,13 +111,14 @@ function drawShareCard(mode) {
   const MOUNT = Math.round(beltH * 0.18);        // drawBelt 가 벨트 밖으로 그리는 받침 두께
   const promoLine = mode === "promotion";
   const yearLine = !!state.startedAt;
+  const tagLine = !promoLine;                    // 승급 모드엔 이미 축하 문구가 있다
 
   /*
    * 줄 수에 따라 내용 높이가 달라지므로 바닥 줄 위 영역에 세로 중앙 정렬한다.
    * 받침(MOUNT)을 빼먹으면 글자가 띠에 달라붙는다.
    */
-  const GAP = 52;
-  const textH = (promoLine ? 44 : 0) + (yearLine ? 36 : 0);
+  const GAP = 48;
+  const textH = (promoLine ? 44 : 0) + (yearLine ? 38 : 0) + (tagLine ? 34 : 0);
   const blockH = beltH + MOUNT * 2 + (textH ? GAP + textH : 0);
   const footY = CARD_H - PAD / 2 - 30;
   const zoneTop = PAD / 2 + 10, zoneBot = footY - 36;
@@ -117,6 +128,7 @@ function drawShareCard(mode) {
 
   let y = top + beltH + MOUNT * 2 + GAP;         // 첫 글자 baseline
   ctx.textAlign = "center";
+
   if (promoLine) {
     const prev = state.history[state.history.length - 2];
     const gap = prev ? daysBetween(parseKey(prev.date), parseKey(since)) : 0;
@@ -128,7 +140,13 @@ function drawShareCard(mode) {
   if (yearLine) {
     ctx.fillStyle = promoLine ? C.muted : C.text;
     ctx.font = font(promoLine ? 26 : 32, 600);
-    ctx.fillText(`주짓수 ${fmtSpan(state.startedAt)}`, cx, y);
+    ctx.fillText(spanLine(), cx, y);
+    y += 38;
+  }
+  if (tagLine) {
+    ctx.fillStyle = C.muted;
+    ctx.font = font(24, 500);
+    ctx.fillText(TAGLINE, cx, y);
   }
   ctx.textAlign = "left";
 

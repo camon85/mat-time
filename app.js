@@ -1484,13 +1484,16 @@ $("setStarted").onchange = e => {
   save(); render();
 };
 
-/** 열림/닫힘이 버튼에서 보이도록 라벨과 상태를 함께 바꾼다 */
+/**
+ * 폼이 열리면 여는 버튼을 숨긴다.
+ * 버튼을 「닫기」로 바꿔 두면 폼 안의 「취소」와 닫는 방법이 둘이 되고,
+ * 여는 버튼이 폼 머리처럼 남아 어색하다.
+ */
 function toggleHistForm(open) {
   const f = $("histForm");
   f.hidden = !open;
   const btn = $("btnAddHist");
-  btn.textContent = open ? "✕ 닫기" : "＋ 승급 기록";
-  btn.classList.toggle("open", open);
+  btn.hidden = open;
   btn.setAttribute("aria-expanded", String(open));
   if (!open) return;
 
