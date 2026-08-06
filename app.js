@@ -328,6 +328,15 @@ function renderToday() {
     : `오늘 <b>${t.getMonth() + 1}/${t.getDate()}(${DOW[t.getDay()]})</b> · 아직 체크 전 — 아래에서 오늘 날짜를 누르세요`;
 }
 
+/**
+ * 앱이 출석을 기록하기 시작한 날.
+ * 주짓수는 오래 했어도 앱은 최근에 쓰기 시작했을 수 있다. 그 경우 총 출석·연속 주가
+ * 실제 수련량을 반영하지 못하므로, 어디부터 센 값인지 함께 알려야 오해가 없다.
+ */
+function trackedSince() {
+  return state.attendance[0] || key(today());   // attendance 는 오름차순 정렬 불변식
+}
+
 /** 최근 4주 실제 페이스 (주당 출석 횟수) */
 function recentPerWeek() {
   const t = today();
@@ -594,17 +603,23 @@ function renderHeatmap() {
   const start = addDays(end, -(WEEKS * 7 - 1));        // 53주 전 일요일
   const on = new Set(state.attendance);
   const promo = new Set(state.history.map(h => h.date));
+  const tracked = trackedSince();
 
   for (let i = 0; i < WEEKS * 7; i++) {
     const d = addDays(start, i);
     const dk = key(d);
     const cell = document.createElement("i");
-    cell.className = d > t ? "future" : promo.has(dk) ? "promo" : on.has(dk) ? "on" : "";
+    // 기록 이전은 "안 나간 날"이 아니라 "데이터 없음" — 빈칸과 구분해 더 어둡게
+    cell.className = d > t ? "future"
+                   : promo.has(dk) ? "promo"
+                   : on.has(dk) ? "on"
+                   : dk < tracked ? "untracked" : "";
     cell.title = dk;
     grid.appendChild(cell);
   }
   const shown = state.attendance.filter(k => k >= key(start) && k <= key(t)).length;
-  $("heatSpan").textContent = `${key(start).slice(0, 7)} ~ ${key(t).slice(0, 7)} · ${shown}회`;
+  const span = `${key(start).slice(0, 7)} ~ ${key(t).slice(0, 7)} · ${shown}회`;
+  $("heatSpan").textContent = tracked > key(start) ? `${tracked}부터 기록 · ${shown}회` : span;
 }
 
 function renderRoadmap() {
@@ -816,9 +831,12 @@ function recordPromotion() {
   save();
   toggleHistForm(false);
   render();
-  toast(current
-    ? `🎉 ${labelOf(belt, stripe)} 축하합니다!`
-    : `${date} · ${labelOf(belt, stripe)} 기록됨`);
+  if (current) {
+    // 자랑하고 싶은 순간이 바로 지금이다. 토스트만 띄우고 끝내지 않는다
+    openShare("promotion");
+  } else {
+    toast(`${date} · ${labelOf(belt, stripe)} 기록됨`);
+  }
 }
 
 function deleteHistory(date) {
@@ -1309,9 +1327,123 @@ function renderPicker() {
   }
 }
 
+
+/* ============================================================
+   공유 — 카드 미리보기 후 내보내기
+   카드 그리기는 share-card.js 가 맡는다.
+   ============================================================ */
+
+const SHARE_URL = "https://camon85.github.io/mat-time/";
+
+let shareBlob = null;
+let sharing = false;      // 연타·재시도로 공유 시트가 두 번 뜨는 것을 막는다
+
+/**
+ * 카드를 미리 만들어 두고 모달을 연다.
+ * Blob 을 여기서 먼저 만드는 이유: iOS Safari 의 navigator.share 는 사용자 제스처
+ * 안에서만 동작하는데, 공유 버튼을 누른 뒤 await 로 그리면 제스처 맥락이 끊긴다.
+ */
+async function openShare(mode) {
+  const box = $("shareBox"), back = $("shareBack");
+  $("shareTitle").textContent = mode === "promotion" ? "🎉 승급을 기록했습니다" : "공유 카드";
+  $("sharePreview").removeAttribute("src");
+  $("shareNote").textContent = "카드를 만드는 중…";
+  box.hidden = false; back.hidden = false;
+
+  try {
+    shareBlob = await drawShareCard(mode);
+  } catch (e) {
+    shareBlob = null;
+    $("shareNote").textContent = "카드를 만들지 못했습니다. 링크만 복사할 수 있습니다.";
+    return;
+  }
+  $("sharePreview").src = URL.createObjectURL(shareBlob);
+  $("shareNote").textContent = "보내기 전에 어떤 내용이 담기는지 확인하세요.";
+}
+
+function closeShare() {
+  $("shareBox").hidden = true;
+  $("shareBack").hidden = true;
+  const img = $("sharePreview");
+  if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  img.removeAttribute("src");
+  shareBlob = null;
+}
+
+function shareText() {
+  const { belt, stripe } = currentRank();
+  const span = state.startedAt ? `주짓수 ${fmtSpan(state.startedAt)} · ` : "";
+  return `${span}${labelOf(belt, stripe)} — Mat Time`;
+}
+
+/**
+ * 환경마다 되는 게 달라 3단으로 내려간다.
+ * 1) 파일 공유(모바일, https 필요) → 2) 이미지 클립보드 → 3) 파일 저장
+ */
+async function sendShare() {
+  if (sharing) return;
+  if (!shareBlob) { toast("카드가 아직 준비되지 않았습니다"); return; }
+  sharing = true;
+  $("btnShareSend").disabled = true;
+  try {
+    await runShare();
+  } finally {
+    sharing = false;
+    $("btnShareSend").disabled = false;
+  }
+}
+
+async function runShare() {
+  const file = new File([shareBlob], `mat-time-${key(today())}.png`, { type: "image/png" });
+
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], text: shareText(), url: SHARE_URL });
+      closeShare();
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;      // 사용자가 취소한 것은 실패가 아니다
+    }
+  }
+
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": shareBlob })]);
+    toast("이미지를 복사했습니다 · 붙여넣기 하세요");
+    return;
+  } catch (e) { /* 다음 단계로 */ }
+
+  saveShare();
+  toast("공유가 지원되지 않아 이미지를 저장했습니다");
+}
+
+function saveShare() {
+  if (!shareBlob) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(shareBlob);
+  a.download = `mat-time-${key(today())}.png`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function copyShareLink() {
+  try {
+    await navigator.clipboard.writeText(SHARE_URL);
+    toast("링크를 복사했습니다");
+  } catch (e) {
+    prompt("아래 주소를 복사하세요", SHARE_URL);
+  }
+}
+
 /* ============================================================
    이벤트 바인딩
    ============================================================ */
+
+$("btnShare").onclick = () => openShare("summary");
+$("btnShareSend").onclick = sendShare;
+$("btnShareSave").onclick = () => { saveShare(); toast("이미지를 저장했습니다"); };
+$("btnShareLink").onclick = copyShareLink;
+$("btnShareClose").onclick = closeShare;
+$("shareBack").onclick = closeShare;
 
 $("setStarted").dataset.clearable = "1";        // 주짓수 시작일은 비울 수 있다
 [$("setStarted"), $("histDate")].forEach(inp => { inp.onclick = () => openPicker(inp); });
@@ -1326,7 +1458,10 @@ $("pickerToday").onclick = () => commitPicker(key(today()));
 $("pickerClear").onclick = () => commitPicker("");
 $("pickerClose").onclick = closePicker;
 $("pickerBack").onclick = closePicker;
-document.addEventListener("keydown", e => { if (e.key === "Escape") closePicker(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (!$("shareBox").hidden) closeShare(); else closePicker();
+});
 
 $("calPrev").onclick = () => {
   calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() - 1, 1);

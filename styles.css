@@ -183,6 +183,12 @@ button:disabled { opacity: .4; cursor: default; }
 .cal-legend span { display: flex; align-items: center; gap: 5px; }
 .cal-legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 
+.card-head { display: flex; align-items: center; justify-content: space-between; }
+.card-head h2 { margin-bottom: 12px; }
+.icon-btn { padding: 6px 9px; line-height: 0; color: var(--muted); }
+.icon-btn:hover { color: var(--text); }
+.icon-btn .ico { width: 16px; height: 16px; }
+
 /* ---------- 통계 ---------- */
 .since { font-size: 12.5px; color: var(--muted); margin: -4px 0 12px; }
 .since b { color: var(--text); font-weight: 700; }
@@ -216,6 +222,8 @@ button:disabled { opacity: .4; cursor: default; }
 .heat i.on { background: var(--accent); }
 .heat i.promo { background: var(--warn); }
 .heat i.future { background: transparent; }
+/* 앱을 쓰기 전 구간 — 빈칸(안 나간 날)보다 어둡게 해서 "데이터 없음"으로 읽히게 */
+.heat i.untracked { background: #14171d; }
 .heat-legend {
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   margin-top: 9px; font-size: 11px; color: var(--muted);
@@ -225,6 +233,7 @@ button:disabled { opacity: .4; cursor: default; }
       background: var(--surface-2); }
 .sw.on { background: var(--accent); }
 .sw.promo { background: var(--warn); }
+.sw.untracked { background: #14171d; }
 
 /* ---------- 로드맵 ---------- */
 .road-list { margin-top: 4px; }
@@ -256,6 +265,12 @@ button:disabled { opacity: .4; cursor: default; }
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px; box-shadow: 0 16px 40px rgba(0,0,0,.5);
 }
+.picker.share { width: min(420px, calc(100vw - 32px)); z-index: 63; }
+#shareBack { z-index: 62; }
+#sharePreview { width: 100%; border-radius: 10px; display: block; margin: 10px 0 4px;
+                background: var(--surface-2); }
+.picker.share .hint { margin: 0 0 12px; }
+
 .picker-head { display: flex; align-items: center; gap: 4px; margin-bottom: 10px; }
 .picker-head button { padding: 5px 9px; font-size: 13px; }
 .picker-title { flex: 1; text-align: center; font-size: 14px; font-weight: 700; }
