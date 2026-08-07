@@ -7,6 +7,7 @@ GitHub Pages 에 함께 올라가도 영향이 없다.
 |---|---|
 | [`sample-data.json`](sample-data.json) | 앱의 **설정 → 복원** 에 넣는 샘플 백업 |
 | [`gen-sample.py`](gen-sample.py) | 그 파일을 만드는 생성기 |
+| [`shots.py`](shots.py) | README 용 스크린샷을 `docs/images/` 에 다시 만든다 |
 
 ## 쓰는 법
 
@@ -42,3 +43,15 @@ python3 dev/gen-sample.py -o 다른경로.json
 
 `validateBackup()` 을 통과하도록 만들어져 있다 — 통과하지 못하면 복원 자체가 거부되므로,
 이 파일이 들어간다는 것 자체가 형식이 온전하다는 증거다.
+
+## 스크린샷
+
+```
+python3 dev/shots.py        # docs/images/*.png 를 다시 만든다
+```
+
+3년치 샘플을 **앱의 복원 경로로 넣은 뒤** 찍으므로 화면 값이 실제 계산 결과다.
+날짜가 오늘 기준 상대라 시간이 지나면 「4.4 / 7개월」 같은 값이 밀린다 —
+README 를 손볼 때 함께 다시 돌리면 된다.
+
+`playwright` 가 필요하다: `pip install playwright && playwright install chromium`
