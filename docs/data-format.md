@@ -9,15 +9,33 @@ Mat Time(주짓수 출석 트래커)이 저장하는 데이터의 형식과 의�
 
 ## 1. 저장 위치
 
+데이터는 **문서 두 개**로 나뉜다 — 코어(출석·승급·설정)와 메모.
+
 | 위치 | 키 / 파일명 | 내용 |
 |---|---|---|
-| 브라우저 localStorage | `bjj-attendance` | **기록 문서** (아래 §3). 앱의 원본 데이터 |
+| 브라우저 localStorage | `bjj-attendance` | **코어 문서** (§3) |
+| 브라우저 localStorage | `bjj-notes` | **메모 문서** (§3.2) |
 | 브라우저 localStorage | `bjj-attendance-sync` | 동기화 설정. **기록과 분리** |
-| 백업 파일 | `bjj-attendance-<YYYY-MM-DD>.json` | 기록 문서를 그대로 내보낸 것 |
-| GitHub Gist (비공개) | `bjj-attendance.json` | 기록 문서. Gist 설명은 `주짓수 출석 트래커 기록` |
+| 백업 파일 | `bjj-attendance-<YYYY-MM-DD>.json` | **두 문서를 합친 하나** (§3.3) |
+| GitHub Gist (비공개) | `bjj-attendance.json` | 코어 문서 |
+| GitHub Gist (비공개) | `bjj-notes.json` | 메모 문서. 같은 gist 안의 두 번째 파일 |
 
-localStorage·백업 파일·Gist **세 곳의 내용은 완전히 동일한 형식**이다.
 직렬화는 `JSON.stringify(doc, null, 2)` (들여쓰기 2칸).
+Gist 설명은 `주짓수 출석 트래커 기록`.
+
+### 1.0 왜 나눴나
+
+메모는 코어의 20~45배 크기가 된다 (§11). 한 문서에 두면
+
+- 출석을 한 번 탭할 때마다 메모 전체를 직렬화해 localStorage 에 쓰고 Gist 에 PATCH 한다
+- `setItem` 은 호출 하나라, 메모가 커져 저장에 실패하면 출석까지 못 쓴다
+- 코어가 Gist 의 1MB inline 임계를 넘어 매번 `raw_url` 로 우회하게 될 수 있다
+
+나눠 두면 출석 경로는 계속 작다. 실제로 출석만 바꾸면 `bjj-attendance.json` 만 PATCH 된다.
+
+**메모 문서가 없어도 정상이다.** 앱은 `bjj-notes` 키가 없으면 빈 메모 문서로 시작하고,
+Gist 에 `bjj-notes.json` 이 없으면 다음 PATCH 때 만든다. 마이그레이션 절차가 필요 없다.
+gist 탐색 기준은 `bjj-attendance.json` 이므로 메모 도입 이전에 만들어진 gist 도 그대로 찾는다.
 
 ### 1.1 동기화 설정 (별도 키)
 
@@ -44,7 +62,7 @@ localStorage·백업 파일·Gist **세 곳의 내용은 완전히 동일한 형
 
 ---
 
-## 3. 기록 문서 스키마
+## 3. 코어 문서 스키마
 
 ```json
 {
@@ -97,6 +115,105 @@ function currentRank(doc) {
 
 > `startedAt` 과 현재 단계 시작일은 다르다.
 > `startedAt` 은 총 수련 기간 표시에만 쓰이고 **승급 계산에 관여하지 않는다**.
+
+### 3.2 메모 문서 스키마
+
+```json
+{
+  "notes": {
+    "2026-08-07": {
+      "text": "히샤우 세미나 — 데라히바 가드 패스 3종",
+      "tag": "seminar",
+      "at": "2026-08-07T11:02:31.884Z"
+    }
+  },
+  "removedNotes": { "2026-07-15": "2026-08-05T02:10:11.000Z" },
+  "tags": [
+    { "id": "class",   "name": "수업" },
+    { "id": "seminar", "name": "세미나" },
+    { "id": "comp",    "name": "대회" },
+    { "id": "video",   "name": "영상" },
+    { "id": "etc",     "name": "기타" },
+    { "id": "노기",     "name": "노기" }
+  ],
+  "removedTags": { "드릴": "2026-08-06T09:00:00.000Z" },
+  "updatedAt": "2026-08-07T11:02:31.884Z",
+  "epoch": 0
+}
+```
+
+| 필드 | 타입 | 필수 | 의미 |
+|---|---|---|---|
+| `notes` | {날짜: 항목} | ✔ | **하루에 하나.** 날짜가 곧 키다 |
+| `removedNotes` | {날짜: ISO} | ✔ | 삭제한 메모 → 삭제 시각. `removed` 와 같은 역할 (§7) |
+| `tags` | 분류[] | ✔ | **1~10개.** 배열 순서가 곧 화면 표시 순서 |
+| `removedTags` | {분류 id: ISO} | ✔ | 삭제한 분류 → 삭제 시각 (§7.5) |
+| `updatedAt` | ISO \| `""` | ✔ | 마지막 변경 시각. 코어의 것과 **독립** |
+| `epoch` | 0 이상 정수 | ✔ | 복원·초기화 세대. 코어와 독립이되 항상 함께 올라간다 (§7.3) |
+
+`notes` 항목:
+
+| 필드 | 타입 | 의미 |
+|---|---|---|
+| `text` | 문자열 | 본문. trim 후 1자 이상 **500자 이하**. 줄바꿈 허용 |
+| `tag` | 분류 id | **반드시 `tags` 안에 있는 id** |
+| `at` | ISO 문자열 | **이 메모를 마지막으로 저장한 시각.** 병합 시 본문 승자 판정 (§7.4) |
+
+`tags` 항목:
+
+| 필드 | 타입 | 의미 |
+|---|---|---|
+| `id` | 문자열 | 1~10자. 메모가 참조하는 값 |
+| `name` | 문자열 | 1~10자. 화면에 보이는 이름 |
+
+#### 분류는 상수가 아니라 데이터다
+
+사용자가 분류를 더하고 지울 수 있으므로 목록을 문서에 저장한다.
+`tags` 가 없거나 비면 아래 **초기값**으로 채워진다.
+
+| id | 이름 |
+|---|---|
+| `class` | 수업 |
+| `seminar` | 세미나 |
+| `comp` | 대회 |
+| `video` | 영상 |
+| `etc` | 기타 |
+
+기본 분류는 id 가 영문이고, **사용자가 만든 분류는 이름 자체가 id 다.**
+이름 변경 기능이 없으므로 둘을 나눌 이유가 없고, 지웠다 같은 이름으로 다시 만들면
+옛 메모와 다시 이어진다. 이름을 바꾸는 기능을 나중에 넣는다면 그때는 id 를 따로 발급해야 한다.
+
+제약:
+
+- **1개 이상 10개 이하.** 0개가 되면 메모를 쓸 수 없고, 10개를 넘으면 칩이 화면을 삼킨다
+- id·이름 모두 **10자 이하**
+- 같은 id 가 둘일 수 없다
+
+#### 왜 항목마다 `at` 을 두나
+
+출석·승급은 켜짐/꺼짐이라, 문서의 `updatedAt` 을 "켠 시각" 대용으로 써도 충분했다 (§7.1).
+그러나 **메모는 내용이 바뀐다.** 문서 단위 시각만으로는 두 기기 중 어느 쪽의 어느 메모가
+더 최신인지 가릴 수 없다. 예를 들어 A 가 3/1 에 메모 X 를, 3/5 에 메모 Y 를 고치면
+A 의 `updatedAt` 은 둘 다 3/5 가 되어, B 가 3/2 에 고친 X 가 부당하게 밀린다.
+
+### 3.3 백업 파일 형식
+
+백업은 **두 문서를 이어 붙인 평평한 객체 하나**다. 코어의 모든 필드에 `notes` ·
+`removedNotes` · `tags` · `removedTags` 가 더해진 모양이며, 메모 문서의 `updatedAt` · `epoch` 은
+내보내지 않는다 (복원할 때 두 문서 모두 새 세대를 부여받으므로 의미가 없다).
+
+```json
+{
+  "startedAt": "2020-03-01",
+  "attendance": ["..."], "removed": {},
+  "history": [], "removedHistory": {},
+  "notes": {}, "removedNotes": {},
+  "tags": [{ "id": "class", "name": "수업" }], "removedTags": {},
+  "updatedAt": "...", "epoch": 3
+}
+```
+
+`notes` · `tags` 키가 없는 옛 백업도 그대로 복원된다 — 메모 0개, 분류는 초기값으로 읽힌다.
 
 ---
 
@@ -242,13 +359,19 @@ const totalPct  = (stepIndex(cur.belt, cur.stripe) + stagePct) / TOTAL_STEPS;
 
 ## 7. 병합 규칙 (동기화)
 
+**두 문서는 따로 병합된다.** 코어는 코어끼리, 메모는 메모끼리 자기 `epoch` 을 보고 판정한다.
+동기화 한 번에 두 문서를 모두 읽고, **내용이 달라진 파일만** PATCH 한다 —
+출석만 바꾸면 `bjj-attendance.json` 하나만 올라간다.
+
 | 필드 | 규칙 |
 |---|---|
 | `epoch` | **다르면 병합 자체를 하지 않는다.** 높은 쪽 문서를 통째로 채택 (§7.3) |
 | `attendance` / `removed` | 날짜마다 **켠 시각 vs 끈 시각**을 비교해 늦은 쪽 (아래) |
 | `history` / `removedHistory` | 위와 **같은 규칙**. 합집합으로 하면 이력 삭제가 되살아난다 |
+| `notes` / `removedNotes` | 날짜의 생사는 위와 같은 규칙, **본문은 항목의 `at`** 으로 판정 (§7.4) |
+| `tags` / `removedTags` | 같은 툼스톤 규칙. 순서는 a 우선, 이름 충돌은 `updatedAt` 늦은 쪽 (§7.5) |
 | `startedAt` | **더 이른 날짜** (빈 값은 무시). 시작일은 가장 이른 기록이 진실 |
-| `updatedAt` | 둘 중 더 최신값 |
+| `updatedAt` | 둘 중 더 최신값 (문서별로 따로) |
 
 현재 벨트·단계 시작일은 이력에서 파생되므로 따로 병합할 필요가 없다.
 
@@ -326,6 +449,65 @@ if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
 **남는 한계** — 두 기기가 각각 오프라인에서 복원해 같은 세대에 도달하면 세대가 같아져
 항목별 병합으로 떨어진다. 실사용에서 마주치기 어려운 경우라 그대로 둔다.
 
+두 문서는 각자 `epoch` 을 갖지만 **복원·초기화는 언제나 둘 다 올린다.** 같은 코드 경로에서
+올리므로 실질적으로 보조를 맞추고, 병합 시엔 서로를 볼 필요가 없다.
+
+### 7.4 메모 — 날짜의 생사와 본문을 따로 판정
+
+날짜가 살아 있는지는 출석과 완전히 같은 규칙이다. `removedNotes[d]` 가 있으면 `(off, 그 시각)`,
+없고 `notes[d]` 가 있으면 `(on, notes[d].at)` — 여기서 문서의 `updatedAt` 이 아니라
+**항목의 `at`** 을 쓰는 것이 유일한 차이다 (§3.2 참조).
+
+살아남은 날짜의 **본문**은 별도로 고른다. 승급 이력처럼 "뒤에 넣은 쪽이 이기는 Map" 을
+쓰면 안 된다 — 이력은 날짜가 곧 사실이라 양쪽 내용이 같지만, 메모는 본문이 다르다.
+
+```js
+function mergeNotes(a, b) {
+  if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
+
+  const dates = new Set([...Object.keys(a.notes), ...Object.keys(b.notes),
+                         ...Object.keys(a.removedNotes), ...Object.keys(b.removedNotes)]);
+  const notes = {}, removedNotes = {};
+  for (const d of dates) {
+    const sideOf = s => s.removedNotes[d] ? { on: false, at: s.removedNotes[d] }
+                      : s.notes[d]        ? { on: true,  at: s.notes[d].at || s.updatedAt || "" }
+                      : null;
+    const x = sideOf(a), y = sideOf(b);
+    const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
+    if (!win) continue;
+    if (!win.on) { removedNotes[d] = win.at; continue; }
+    // 본문은 at 이 늦은 쪽
+    const na = a.notes[d], nb = b.notes[d];
+    notes[d] = !na ? nb : !nb ? na : ((nb.at || "") > (na.at || "") ? nb : na);
+  }
+  return { notes, removedNotes,
+           updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt,
+           epoch: a.epoch };
+}
+```
+
+같은 날짜를 두 기기가 각각 고치면 **나중에 저장한 쪽만 남고 다른 쪽은 사라진다.**
+줄 단위 병합 같은 건 하지 않는다.
+
+### 7.5 분류 — 합집합이 아니라 툼스톤
+
+분류도 출석과 같은 함정을 갖는다. 합집합만 쓰면 **한쪽에서 지운 분류가 다른 기기에서 되살아난다.**
+그래서 `removedTags` 툼스톤을 두고 같은 `pickByStamp` 를 태운다.
+"켠 시각"은 항목별 값이 없으므로 문서의 `updatedAt` 을 쓴다 (§7.1 과 같은 근사).
+
+살아남은 분류의 **순서**는 `a` 의 배열 순서를 먼저 두고 `b` 에만 있는 것을 뒤에 붙인다.
+쓰던 기기에서 칩 순서가 흔들리지 않게 하기 위해서다.
+**이름**이 다르면 `updatedAt` 이 늦은 쪽을 쓴다.
+
+양쪽에서 각각 추가해 합집합이 10개를 넘으면 앞에서부터 10개만 남긴다.
+결과가 0개면 초기값으로 되돌린다.
+
+마지막으로 **분류가 사라진 메모를 첫 분류로 떨어뜨린다.** 이 정리를 빼먹으면 어느 필터에도
+걸리지 않고 「전체」에서만 보이는 유령 메모가 생긴다.
+
+앱에서 분류를 지울 때도 같은 처리를 한다 — 그 분류를 쓰던 메모를 첫 분류로 옮기고,
+**옮긴 메모의 `at` 을 갱신한다.** 갱신하지 않으면 다른 기기로 이동이 전파되지 않는다.
+
 ## 8. 불변식
 
 앱이 저장한 문서라면 아래는 항상 참이다. 읽는 쪽에서 믿어도 된다.
@@ -336,6 +518,12 @@ if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
 4. `history[i].belt` 는 `0..4`, `stripe` 는 `0..4`, `belt === 4`면 `stripe === 0`
 5. 날짜 필드는 `YYYY-MM-DD` 이거나 (`startedAt` 한정) `""` 이다
 6. `epoch` 는 0 이상의 정수이며, 복원·초기화 때만 올라간다
+7. `notes` 의 키와 `removedNotes` 의 키는 겹치지 않는다
+8. `notes[d].text` 는 trim 된 1~500자, `at` 은 빈 문자열이 아니다
+9. **`notes[d].tag` 는 반드시 `tags` 안에 있다** — 없는 분류를 가리키는 메모는 존재하지 않는다
+10. `tags` 는 1~10개이고 `id` 가 유일하며, `removedTags` 의 키와 겹치지 않는다
+11. **`notes` 의 날짜는 `attendance` 와 아무 관계가 없다** — 출석 없는 날의 메모도, 메모 없는
+    출석일도 정상이다
 
 **보장하지 않는 것** — 사용자가 자유롭게 기록할 수 있으므로 아래는 가정하면 안 된다.
 
@@ -370,6 +558,27 @@ if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
 
 즉 **최소 문서는 `{}` 이며**, 이것만 넣어도 "오늘 시작한 화이트 0그랄"로 해석된다.
 
+메모 문서는 `normalizeNotes` 가 같은 방식으로 보정한다. 코어와 필드 이름이 겹치지 않으므로
+**localStorage·Gist·백업 파일 세 경로를 이 함수 하나로 읽는다.**
+
+| 입력 | 처리 |
+|---|---|
+| 키가 날짜 형식이 아님 | 항목 제거 |
+| 항목이 객체가 아님 | 항목 제거 |
+| `text` 가 문자열 아님·trim 후 빈 문자열 | **항목 제거** (빈 메모는 메모가 아니다) |
+| `text` 가 500자 초과 | 500자로 자름 |
+| `tag` 가 `tags` 에 없음 | **첫 분류**로 보정 |
+| `at` 이 없거나 빈 문자열 | 문서의 `updatedAt` 으로 대체 (병합에 쓸 값이 반드시 있어야 함) |
+| `notes` 와 `removedNotes` 에 같은 날짜 | **삭제가 이긴다** |
+| `notes` 가 객체가 아님 | 빈 객체 |
+| `tags` 항목의 `id`·`name` 형식 위반 | 항목 제거 |
+| `tags` 에 중복 id | 뒤엣것 제거 |
+| `tags` 와 `removedTags` 에 같은 id | **삭제가 이긴다** |
+| `tags` 가 10개 초과 | 앞에서 10개만 |
+| `tags` 가 배열이 아니거나 결과가 0개 | **초기값 5종** |
+
+**분류를 메모보다 먼저 정리한다** — 메모의 `tag` 를 그 목록에 맞춰 보정해야 하기 때문이다.
+
 ### 9.1 복원 시 검증 (`validateBackup`) — 전부 또는 전무
 
 파일에서 불러올 때는 보정 전에 형식을 확인하고, **항목 하나라도 어긋나면 파일 전체를 받지 않는다.**
@@ -389,15 +598,33 @@ if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
 | 블랙벨트 + 그랄 | `블랙벨트에는 그랄이 없습니다` |
 | `history` 승급일 중복 | `history 에 중복된 승급일이 있습니다` |
 | `removed`·`removedHistory` 키·값 | `removed["..."] 의 값이 비어 있습니다` |
+| `tags` 개수 | `tags 가 10개를 넘습니다 (12개)` / `tags 가 비어 있습니다` |
+| `tags` 항목 구조·`id` | `tags 의 id "..." 가 1~10자 문자열이 아닙니다` |
+| `tags[i].name` 비어 있음·길이 | `tags["..."].name 이 10자를 넘습니다 (11자)` |
+| `tags` id 중복 | `tags 에 중복된 id "..." 가 있습니다` |
+| `notes` 키 날짜 형식 | `notes 의 키 "..." 가 날짜 형식이 아닙니다` |
+| `notes` 항목 구조 | `notes["..."] 가 객체가 아닙니다` |
+| `notes[d].text` 비어 있음 | `notes["..."].text 가 비어 있습니다` |
+| `notes[d].text` 길이 | `notes["..."].text 가 500자를 넘습니다 (501자)` |
+| `notes[d].tag` 가 `tags` 에 있는지 | `notes["..."].tag "sparring" 가 tags 에 없습니다` |
+| `notes[d].at` 비어 있음 | `notes["..."].at 이 비어 있습니다` |
+| `removedNotes` · `removedTags` 키·값 | `removedNotes["..."] 의 값이 비어 있습니다` |
+| `tags` ∩ `removedTags` | `"..." 가 tags 와 removedTags 양쪽에 있습니다` |
 | `attendance` ∩ `removed` | `... 이 attendance 와 removed 양쪽에 있습니다` |
 | `history` ∩ `removedHistory` | `... 이 history 와 removedHistory 양쪽에 있습니다` |
-
+| `notes` ∩ `removedNotes` | `... 이 notes 와 removedNotes 양쪽에 있습니다` |
 | `epoch` 타입 | `항목 형식이 올바르지 않습니다 — epoch` (0 이상 정수여야 함) |
 
 아는 항목은 `startedAt` · `attendance` · `removed` · `history` · `removedHistory` ·
-`updatedAt` · `epoch` 이며, **하나라도 있고 나머지 검사를 모두 통과해야** 받아들인다.
-통과하면 §8 의 불변식이 이미 성립하므로 `normalize` 가 버리는 항목은 없다.
-그 뒤 요약(출석 N일 · 이력 N건)을 보여주고 확인을 받은 다음 덮어쓴다.
+`notes` · `removedNotes` · `tags` · `removedTags` · `updatedAt` · `epoch` 이며,
+**하나라도 있고 나머지 검사를 모두 통과해야** 받아들인다.
+통과하면 §8 의 불변식이 이미 성립하므로 `normalize`·`normalizeNotes` 가 버리는 항목은 없다.
+그 뒤 요약(출석 N일 · 이력 N건 · 메모 N개)을 보여주고 확인을 받은 다음 덮어쓴다.
+
+`notes` · `tags` 검증은 **관용성이 없다.** `normalizeNotes` 라면 모르는 분류를 첫 분류로
+바꾸고 501자를 잘라내겠지만, 복원 경로에서는 그런 조용한 변형이 곧 데이터 손실이므로
+파일 전체를 거부한다. `tags` 가 없는 파일은 초기값 5종으로 검사한다 —
+그래야 옛 백업의 `class`·`seminar` 같은 id 가 그대로 통과한다.
 
 ---
 
@@ -427,12 +654,50 @@ if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
 `removed` · `removedHistory` 는 취소하고 다시 체크하지 않은 날짜만 담으므로 보통 비어 있다.
 크기에 실질적인 영향이 없어 위 표에는 반영하지 않았다.
 
+### 11.1 메모 문서 — 왜 따로 두는지가 여기 있다
+
+메모 실측. 본문은 한글 60자(1~3줄) 기준, `500자` 행만 상한을 매번 채운 최악을 가정.
+한글은 UTF-8 3바이트 · UTF-16 2바이트라 저장 위치마다 크기가 다르다.
+
+| 시나리오 | 메모 수 | 코어 문서 | 메모 문서 (Gist·UTF-8) | 메모 문서 (localStorage·UTF-16) |
+|---|---|---|---|---|
+| 주 3회 × 1년 | 156 | 3 KB | 32 KB | 45 KB |
+| 주 3회 × 10년 | 1,560 | 28 KB | 315 KB | 447 KB |
+| 매일 × 10년 | 3,653 | 64 KB | 738 KB | 1,048 KB |
+| 주 3회 × 10년 · 매번 500자 | 1,560 | 28 KB | 2,446 KB | 1,846 KB |
+
+**메모가 코어의 10~30배다.** 한 문서에 뒀다면 출석 한 번 탭할 때마다 이만큼을 다시 쓰고
+업로드했을 것이다. 나눠 두었으므로 출석 경로는 어느 시나리오에서든 28~64 KB 에 머문다.
+
+시간 (중앙값 9회, 첫 호출은 JIT 워밍업이라 버림):
+
+| 시나리오 | `render()` | 메모 목록 | `mergeNotes()` | 검색 1타 | 직렬화 |
+|---|---|---|---|---|---|
+| 주 3회 × 1년 | 1.0 ms | 0.0 ms | 0.2 ms | 0.0 ms | 0.0 ms |
+| 주 3회 × 10년 | 2.9 ms | 0.2 ms | 1.5 ms | 0.4 ms | 0.4 ms |
+| 매일 × 10년 | 4.4 ms | 0.4 ms | 3.0 ms | 0.9 ms | 1.0 ms |
+| 주 3회 × 10년 · 매번 500자 | 2.3 ms | 0.2 ms | 1.2 ms | **12.9 ms** | 1.6 ms |
+
+달력 카드의 `renderMonthNotes()` 가 메모 수와 거의 무관한 건 3개씩만 그리기 때문이다.
+「전체 메모」 화면의 `renderAllNotes()` 는 **전부** 그리는데, 그래도 10년치(1,560개)가 7.2 ms 다
+(연·월 그룹 머리글 포함). 자세한 수치는
+[`implementation.md`](implementation.md) 의 「더 보기를 없앤 이유」 참조.
+검색은 **150 ms 디바운스**를 걸어, 위 12.9 ms 가 타이핑 한 글자마다가 아니라 멈춘 뒤 한 번만 든다.
+
 관련 한계선:
 
-- **Gist API 응답 잘림**: 파일 1 MB 초과 시 `truncated: true` 가 되고 본문 대신 `raw_url` 을 받아야 한다.
-  30년치가 194 KB 이므로 도달하려면 **150년 이상** 필요하다. 앱은 잘림도 이미 처리한다
-- **localStorage 할당량**: 브라우저당 보통 5 MB. 30년치가 0.2 MB
-- 모든 연산이 출석 수에 **선형**으로만 늘어난다. 실사용 규모에서 체감 지연은 없다
+- **Gist API 응답 잘림**: 파일 1 MB 초과 시 `truncated: true` 가 되고 본문 대신 `raw_url` 을 받는다.
+  코어는 30년치가 194 KB 이므로 도달하려면 **150년 이상** 필요하다.
+  메모는 매번 500자를 채우면 10년에 2.4 MB 로 넘길 수 있는데, `readGistFile()` 이 두 파일 모두
+  잘림을 처리하므로 동작에는 문제가 없다 — 읽을 때 요청이 한 번 더 갈 뿐이다.
+  **코어가 이 경로를 타지 않게 만든 것이 분리의 효과 중 하나다**
+- **localStorage 할당량**: 브라우저당 보통 5~10 MB. 최악 시나리오(1.8 MB)에서도 여유가 있다.
+  단 **할당량은 오리진 단위라 키를 나눠도 총량은 늘지 않는다.** 분리가 버는 것은 용량이 아니라,
+  한도에 닿았을 때 실패가 메모 쪽 `setItem` 에만 떨어져 출석 저장이 살아남는다는 점이다
+- **검색은 유일하게 선형 비용이 체감될 수 있는 경로다.** 전체 본문을 훑으므로 최악
+  시나리오에서 12.9 ms 로 한 프레임(16.7 ms)에 가까워진다. 그래서 **150 ms 디바운스**를 건다 —
+  타이핑 중에는 돌지 않고 멈춘 뒤 한 번만 돈다
+- 그 밖의 모든 연산이 항목 수에 **선형**으로만 늘어난다
 
 > **구현 주의** — 병합에서 날짜 존재 확인은 반드시 `Set` 으로 해야 한다.
 > 배열 `includes` 를 날짜마다 부르면 O(n²) 이 되어 30년치 병합이 210 ms 까지 늘어난다
@@ -454,7 +719,16 @@ for m, n in sorted(by_month.items()):
 since = doc["history"][-1]["date"] if doc["history"] else doc.get("startedAt", "")
 stage = [d for d in doc["attendance"] if d >= since]
 print("현재 단계:", len(stage), "일")
+
+# 대회 메모만 최신순으로. 백업 파일이면 notes 가 최상위에 있다
+for d, note in sorted(doc.get("notes", {}).items(), reverse=True):
+    if note["tag"] == "comp":
+        print(d, note["text"])
 ```
+
+> Gist 나 localStorage 에서 직접 읽는다면 메모는 **다른 파일·다른 키**에 있다
+> (`bjj-notes.json` / `bjj-notes`). 그때는 `doc["notes"]` 가 아니라 메모 문서의
+> 최상위 `notes` 를 본다. 백업 파일만 둘이 합쳐진 형태다 (§3.3).
 
 ### JavaScript — 최소 문서 만들기
 
@@ -469,6 +743,22 @@ const doc = {
   epoch: 0
 };
 localStorage.setItem("bjj-attendance", JSON.stringify(doc, null, 2));
+
+// 메모는 별도 키 (없어도 앱은 정상 동작한다)
+const notes = {
+  notes: {
+    "2026-06-02": { text: "클로즈 가드 브레이크", tag: "class",
+                    at: new Date().toISOString() }
+  },
+  removedNotes: {},
+  updatedAt: new Date().toISOString(),
+  epoch: 0
+};
+localStorage.setItem("bjj-notes", JSON.stringify(notes, null, 2));
 ```
 
-앱의 **복원** 기능에 이 JSON 파일을 넣어도 동일하게 반영된다.
+앱의 **복원** 기능에 넣을 때는 둘을 합친 평평한 파일 하나로 만든다 (§3.3).
+
+```js
+const backup = { ...doc, notes: notes.notes, removedNotes: notes.removedNotes };
+```

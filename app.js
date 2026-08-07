@@ -88,7 +88,15 @@ function monthsElapsed(from, to) {
    상태 / 저장
    ============================================================ */
 
+/*
+ * 문서를 둘로 나눠 둔다.
+ *
+ * 메모는 출석의 20~45배 크기가 된다 (10년 뒤 출석 40KB vs 메모 430KB).
+ * 한 문서에 두면 출석을 한 번 탭할 때마다 메모 전체를 직렬화해 쓰고 Gist 에 올리게 되고,
+ * 저장이 실패하면 둘이 같이 죽는다. 나누면 출석 경로는 계속 작게 유지된다.
+ */
 const STORE_KEY = "bjj-attendance";
+const NOTES_KEY = "bjj-notes";
 
 /*
  * 현재 벨트·그랄·단계 시작일은 따로 저장하지 않는다. 승급 이력(history)의
@@ -130,21 +138,27 @@ function load() {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * { 키: ISO 시각 } 꼴만 걸러 낸다 (removed · removedHistory · removedNotes · removedTags 공용).
+ * 키 검사는 기본이 날짜이고, 분류 툼스톤처럼 날짜가 아닌 키는 okKey 로 바꿔 준다.
+ */
+function stampMap(src, okKey) {
+  const ok = okKey || (k => DATE_RE.test(k));
+  const o = {};
+  if (src && typeof src === "object" && !Array.isArray(src)) {
+    for (const [k, v] of Object.entries(src)) {
+      if (ok(k) && typeof v === "string" && v) o[k] = v;
+    }
+  }
+  return o;
+}
+
 function normalize(d) {
   const att = Array.isArray(d.attendance)
     ? [...new Set(d.attendance.filter(s => typeof s === "string" && DATE_RE.test(s)))].sort()
     : [];
-  const stamps = src => {
-    const o = {};
-    if (src && typeof src === "object" && !Array.isArray(src)) {
-      for (const [k, v] of Object.entries(src)) {
-        if (DATE_RE.test(k) && typeof v === "string" && v) o[k] = v;
-      }
-    }
-    return o;
-  };
-  const rem = stamps(d.removed);
-  const remHist = stamps(d.removedHistory);
+  const rem = stampMap(d.removed);
+  const remHist = stampMap(d.removedHistory);
   // 날짜를 키로 중복 제거 + 오름차순 정렬 — 손으로 만든 파일을 불러와도 불변식이 유지된다
   const hist = Array.isArray(d.history)
     ? [...new Map(d.history
@@ -265,6 +279,7 @@ function render() {
   renderGoal();
   renderCalendar();
   renderStats();
+  renderNotes();
   renderRoadmap();
   renderSettings();
   renderSync();
@@ -502,6 +517,12 @@ function renderCalendar() {
       dot.className = "promo-dot";
       btn.appendChild(dot);
     }
+    // 메모 표식은 하단 중앙 — 우상단은 승급일 점이 쓴다
+    if (noteDoc.notes[dk]) {
+      const mark = document.createElement("span");
+      mark.className = "note-mark";
+      btn.appendChild(mark);
+    }
     if (!other) btn.onclick = () => toggleDay(dk);
     grid.appendChild(btn);
   }
@@ -510,6 +531,10 @@ function renderCalendar() {
   const t = today();
   $("calNext").disabled = (y > t.getFullYear()) ||
                           (y === t.getFullYear() && m >= t.getMonth());
+
+  // 달 아래 메모 목록도 여기서 갱신한다 — 월 이동 버튼은 이 함수만 부르므로
+  // 빼먹으면 달을 넘겨도 메모가 이전 달 것으로 남는다
+  renderMonthNotes();
 }
 
 /** 시작일로부터 지금까지를 "N년 M개월째" 로. 한 달 미만이면 일 단위 */
@@ -850,8 +875,14 @@ function deleteHistory(date) {
   toast("기록을 삭제했습니다");
 }
 
+/** 백업은 두 문서를 이어 붙인 평평한 객체 — 사용자에겐 계속 파일 하나다 */
+function backupDoc() {
+  return { ...state, notes: noteDoc.notes, removedNotes: noteDoc.removedNotes,
+           tags: noteDoc.tags, removedTags: noteDoc.removedTags };
+}
+
 function exportData() {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(backupDoc(), null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = `bjj-attendance-${key(today())}.json`;
@@ -874,16 +905,22 @@ const BACKUP_FIELDS = {
   removed:        v => v && typeof v === "object" && !Array.isArray(v),
   history:        v => Array.isArray(v),
   removedHistory: v => v && typeof v === "object" && !Array.isArray(v),
+  notes:          v => v && typeof v === "object" && !Array.isArray(v),
+  removedNotes:   v => v && typeof v === "object" && !Array.isArray(v),
+  tags:           v => Array.isArray(v),
+  removedTags:    v => v && typeof v === "object" && !Array.isArray(v),
   updatedAt:      v => typeof v === "string",
   epoch:          v => Number.isInteger(v) && v >= 0
 };
 
 const isRank = v => Number.isInteger(v) && v >= 0 && v <= MAX_STRIPE;
 
-/** 시각 도장 맵({날짜: ISO})이 온전한지 */
-function badStampMap(m, name) {
+/** 시각 도장 맵({키: ISO})이 온전한지. 키 검사는 기본이 날짜, 분류 툼스톤만 okKey 를 준다 */
+function badStampMap(m, name, okKey) {
+  const ok = okKey || (k => DATE_RE.test(k));
+  const what = okKey ? "형식에 맞지 않습니다" : "날짜 형식이 아닙니다";
   for (const [k, v] of Object.entries(m)) {
-    if (!DATE_RE.test(k)) return `${name} 의 키 "${k}" 가 날짜 형식이 아닙니다.`;
+    if (!ok(k)) return `${name} 의 키 "${k}" 가 ${what}.`;
     if (typeof v !== "string" || !v) return `${name}["${k}"] 의 값이 비어 있습니다.`;
   }
   return null;
@@ -900,6 +937,8 @@ function validateBackup(d) {
 
   const att = d.attendance || [], hist = d.history || [];
   const rem = d.removed || {}, remHist = d.removedHistory || {};
+  const notes = d.notes || {}, remNotes = d.removedNotes || {};
+  const tags = d.tags || DEFAULT_TAGS, remTags = d.removedTags || {};
 
   if (d.startedAt && !DATE_RE.test(d.startedAt))
     return `startedAt "${d.startedAt}" 이 날짜 형식이 아닙니다.`;
@@ -925,13 +964,55 @@ function validateBackup(d) {
   const hDates = hist.map(h => h.date);
   if (new Set(hDates).size !== hDates.length) return "history 에 중복된 승급일이 있습니다.";
 
-  const stampErr = badStampMap(rem, "removed") || badStampMap(remHist, "removedHistory");
+  /*
+   * 분류를 메모보다 먼저 검사한다 — 메모의 tag 가 이 목록 안에 있는지 봐야 하기 때문.
+   * normalize 라면 모르는 분류를 첫 분류로 떨어뜨리겠지만, 복원에서 그런 조용한 변형은 손실이다.
+   */
+  if (tags.length > MAX_TAGS)
+    return `tags 가 ${MAX_TAGS}개를 넘습니다 (${tags.length}개).`;
+  const tagIds = new Set();
+  for (const t of tags) {
+    if (!t || typeof t !== "object" || Array.isArray(t))
+      return "tags 에 객체가 아닌 항목이 있습니다.";
+    if (!okTagId(t.id))
+      return `tags 의 id ${JSON.stringify(t.id)} 가 1~${TAG_NAME_MAX}자 문자열이 아닙니다.`;
+    if (typeof t.name !== "string" || !t.name.trim())
+      return `tags["${t.id}"].name 이 비어 있습니다.`;
+    if (t.name.length > TAG_NAME_MAX)
+      return `tags["${t.id}"].name 이 ${TAG_NAME_MAX}자를 넘습니다 (${t.name.length}자).`;
+    if (tagIds.has(t.id)) return `tags 에 중복된 id "${t.id}" 가 있습니다.`;
+    tagIds.add(t.id);
+  }
+  if (!tagIds.size) return "tags 가 비어 있습니다 — 분류는 하나 이상이어야 합니다.";
+
+  for (const [k, v] of Object.entries(notes)) {
+    if (!DATE_RE.test(k)) return `notes 의 키 "${k}" 가 날짜 형식이 아닙니다.`;
+    if (!v || typeof v !== "object" || Array.isArray(v))
+      return `notes["${k}"] 가 객체가 아닙니다.`;
+    if (typeof v.text !== "string" || !v.text.trim())
+      return `notes["${k}"].text 가 비어 있습니다.`;
+    if (v.text.length > NOTE_MAX)
+      return `notes["${k}"].text 가 ${NOTE_MAX}자를 넘습니다 (${v.text.length}자).`;
+    if (!tagIds.has(v.tag))
+      return `notes["${k}"].tag "${v.tag}" 가 tags 에 없습니다.`;
+    if (typeof v.at !== "string" || !v.at)
+      return `notes["${k}"].at 이 비어 있습니다.`;
+  }
+
+  const stampErr = badStampMap(rem, "removed") || badStampMap(remHist, "removedHistory")
+                   || badStampMap(remNotes, "removedNotes")
+                   || badStampMap(remTags, "removedTags", okTagId);
   if (stampErr) return stampErr;
+
+  const dupT = [...tagIds].find(id => id in remTags);
+  if (dupT) return `"${dupT}" 가 tags 와 removedTags 양쪽에 있습니다.`;
 
   const dupA = att.find(k => k in rem);
   if (dupA) return `${dupA} 이 attendance 와 removed 양쪽에 있습니다.`;
   const dupH = hDates.find(k => k in remHist);
   if (dupH) return `${dupH} 이 history 와 removedHistory 양쪽에 있습니다.`;
+  const dupN = Object.keys(notes).find(k => k in remNotes);
+  if (dupN) return `${dupN} 이 notes 와 removedNotes 양쪽에 있습니다.`;
 
   return null;
 }
@@ -956,18 +1037,23 @@ function importData(file) {
 
     // 검증을 통과했으므로 normalize 가 버리는 항목은 없다
     const next = normalize(data);
+    const nextNotes = normalizeNotes(data);
     const lines = [
       "불러올 내용",
       `· 출석 ${next.attendance.length}일`,
-      `· 승급 이력 ${next.history.length}건`
+      `· 승급 이력 ${next.history.length}건`,
+      `· 메모 ${Object.keys(nextNotes.notes).length}개`
     ];
     if (next.startedAt) lines.push(`· 주짓수 시작일 ${next.startedAt}`);
-    lines.push("", `현재 기록(출석 ${state.attendance.length}일 · 이력 ${state.history.length}건)을 덮어씁니다. 계속할까요?`);
+    lines.push("", `현재 기록(출석 ${state.attendance.length}일 · 이력 ${state.history.length}건 · ` +
+                   `메모 ${Object.keys(noteDoc.notes).length}개)을 덮어씁니다. 계속할까요?`);
     if (!confirm(lines.join("\n"))) return;
 
-    // 이전 세대보다 반드시 커야 다른 기기의 옛 데이터를 이긴다
+    // 이전 세대보다 반드시 커야 다른 기기의 옛 데이터를 이긴다. 두 문서 모두 올린다
     next.epoch = Math.max(state.epoch, next.epoch) + 1;
+    nextNotes.epoch = Math.max(noteDoc.epoch, nextNotes.epoch) + 1;
     state = next;
+    noteDoc = nextNotes;
     calCursor = today();
     saveOverwrite();
     render();
@@ -978,111 +1064,90 @@ function importData(file) {
 
 function resetAll() {
   const extra = syncOn() ? "\n연결된 Gist의 기록도 함께 비워집니다." : "";
-  if (!confirm("모든 출석 기록과 벨트 정보를 지웁니다. 되돌릴 수 없습니다." + extra)) return;
+  if (!confirm("모든 출석 기록과 벨트 정보, 메모를 지웁니다. 되돌릴 수 없습니다." + extra)) return;
   if (!confirm("정말 초기화할까요?")) return;
-  const prevEpoch = state.epoch;
+  const prevEpoch = state.epoch, prevNotes = noteDoc.epoch;
   state = normalize({});
   state.epoch = prevEpoch + 1;
+  noteDoc = normalizeNotes({});
+  noteDoc.epoch = prevNotes + 1;
   calCursor = today();
   saveOverwrite();
   render();
   toast("초기화되었습니다");
 }
 
-/* ============================================================
-   기기 간 동기화 — GitHub Gist
-   토큰은 state 와 분리해 별도 키에 보관한다 (백업 파일에 섞이지 않도록).
-   ============================================================ */
+/**
+ * 폼이 열리면 여는 버튼을 숨긴다.
+ * 버튼을 「닫기」로 바꿔 두면 폼 안의 「취소」와 닫는 방법이 둘이 되고,
+ * 여는 버튼이 폼 머리처럼 남아 어색하다.
+ */
+function toggleHistForm(open) {
+  const f = $("histForm");
+  f.hidden = !open;
+  const btn = $("btnAddHist");
+  btn.hidden = open;
+  btn.setAttribute("aria-expanded", String(open));
+  if (!open) return;
 
-const SYNC_KEY = "bjj-attendance-sync";
-const GIST_FILE = "bjj-attendance.json";
-const GIST_DESC = "주짓수 출석 트래커 기록";
-
-let sync = { token: "", gistId: "", lastSync: "" };
-let syncStatus = { kind: "off", msg: "" };   // off | ok | busy | err
-let syncTimer = null;
-
-function loadSync() {
-  try {
-    const raw = localStorage.getItem(SYNC_KEY);
-    if (raw) Object.assign(sync, JSON.parse(raw));
-  } catch (e) { /* 손상된 값은 무시하고 미연결 상태로 시작 */ }
-}
-function saveSync() {
-  try { localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); } catch (e) {}
-}
-const syncOn = () => !!(sync.token && sync.gistId);
-
-async function gh(path, opts = {}) {
-  const headers = { "Accept": "application/vnd.github+json",
-                    "Authorization": "Bearer " + sync.token };
-  if (opts.body) headers["Content-Type"] = "application/json";
-  let res;
-  try {
-    res = await fetch("https://api.github.com" + path, { ...opts, headers });
-  } catch (e) {
-    throw new Error("네트워크에 연결할 수 없습니다");
-  }
-  if (!res.ok) {
-    throw new Error(
-      res.status === 401 ? "토큰이 유효하지 않거나 만료되었습니다"
-      : res.status === 403 ? "권한이 없습니다 — 토큰에 gist 권한이 있는지 확인하세요"
-      : res.status === 404 ? "Gist를 찾을 수 없습니다 — 연결을 해제하고 다시 연결하세요"
-      : "깃허브 오류 " + res.status);
-  }
-  return res.json();
+  // 기본값: 오늘 + 다음 그랄/벨트. 지난 승급이면 날짜만 바꾸면 된다
+  const cur = currentRank();
+  const nx = nextOf(cur.belt, cur.stripe);
+  $("histDate").value = key(today());
+  form = { belt: nx.belt, stripe: nx.stripe };
+  renderForm();
+  renderHistEffect();
 }
 
 /**
- * 문서 병합.
+ * 날짜마다 "켠 시각 vs 끈 시각"을 비교해 늦은 쪽을 따른다.
  *
- * 출석은 단순 합집합이 아니다 — 그러면 방금 취소한 날짜가 원격에서 되살아나
- * 해제가 아예 동작하지 않는다. 날짜마다 "켠 시각 vs 끈 시각"을 비교해 늦은 쪽을 따른다.
- * 켠 시각은 따로 저장하지 않고 그 문서의 updatedAt 을 대용으로 쓴다
- * (변경 직후 곧바로 push 하므로 충분히 근사하다).
+ * 단순 합집합이면 방금 취소한 날짜가 원격에서 되살아나 해제가 아예 동작하지 않는다.
+ * 존재 확인은 반드시 Set 으로 한다 — 배열 includes 를 날짜마다 부르면 O(n²) 이 되어
+ * 10년치에서 수십 ms, 30년치에서 수백 ms 가 걸린다.
+ *
+ * atOf 를 주지 않으면 문서의 updatedAt 을 "켠 시각" 대용으로 쓴다 (변경 직후 곧바로
+ * push 하므로 충분히 근사하다). 내용이 바뀌는 메모는 항목마다 시각을 갖고 있어 그쪽을 준다.
  */
+function pickByStamp(a, b, keysOf, tombOf, atOf) {
+  const sa = new Set(keysOf(a)), sb = new Set(keysOf(b));
+  const ta = tombOf(a), tb = tombOf(b);
+  const kept = [], tombs = {};
+  for (const d of new Set([...sa, ...sb, ...Object.keys(ta), ...Object.keys(tb)])) {
+    const sideOf = (s, set, t) =>
+      t[d] ? { on: false, at: t[d] }
+      : set.has(d) ? { on: true, at: atOf ? atOf(s, d) : (s.updatedAt || "") }
+      : null;
+    const x = sideOf(a, sa, ta), y = sideOf(b, sb, tb);
+    const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
+    if (!win) continue;
+    if (win.on) kept.push(d); else tombs[d] = win.at;
+  }
+  return { kept, tombs };
+}
+
+/*
+ * 복원·초기화는 "지금부터 이 문서가 진실"이라는 선언이다. 항목별 툼스톤으로는
+ * 다른 기기에만 있는 데이터까지 무효로 만들 수 없어, 그 기기가 동기화하면
+ * 지웠던 것이 전부 되살아난다. 그래서 세대가 다르면 병합하지 않고 높은 쪽을 통째로 쓴다.
+ */
+const newerEpoch = (a, b) => ({ ...(a.epoch > b.epoch ? a : b) });
+
+/** 코어 문서 병합 — 출석 · 승급 이력 · 시작일 */
 function mergeStates(a, b) {
-  /*
-   * 복원·초기화는 "지금부터 이 문서가 진실"이라는 선언이다. 항목별 툼스톤으로는
-   * 다른 기기에만 있는 데이터까지 무효로 만들 수 없어, 그 기기가 동기화하면
-   * 지웠던 것이 전부 되살아난다. 그래서 세대가 다르면 병합하지 않고 높은 쪽을 통째로 쓴다.
-   */
-  if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
+  if (a.epoch !== b.epoch) return newerEpoch(a, b);
 
-  /*
-   * 출석과 승급 이력 모두 같은 규칙 — 날짜마다 켠 시각 vs 끈 시각을 비교해 늦은 쪽.
-   * 존재 확인은 반드시 Set 으로 한다. 배열 includes 를 날짜마다 부르면 O(n²) 이 되어
-   * 10년치에서 수십 ms, 30년치에서 수백 ms 가 걸린다.
-   */
-  const pick = (keysOf, tombOf) => {
-    const sa = new Set(keysOf(a)), sb = new Set(keysOf(b));
-    const ta = tombOf(a), tb = tombOf(b);
-    const kept = [], tombs = {};
-    for (const d of new Set([...sa, ...sb, ...Object.keys(ta), ...Object.keys(tb)])) {
-      const sideOf = (s, set, t) => t[d] ? { on: false, at: t[d] }
-                                  : set.has(d) ? { on: true, at: s.updatedAt || "" }
-                                  : null;
-      const x = sideOf(a, sa, ta), y = sideOf(b, sb, tb);
-      const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
-      if (!win) continue;
-      if (win.on) kept.push(d); else tombs[d] = win.at;
-    }
-    return { kept, tombs };
-  };
-
-  const att = pick(s => s.attendance, s => s.removed);
-  const his = pick(s => s.history.map(h => h.date), s => s.removedHistory);
+  const att = pickByStamp(a, b, s => s.attendance, s => s.removed);
+  const his = pickByStamp(a, b, s => s.history.map(h => h.date), s => s.removedHistory);
 
   const histByDate = new Map();
   [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
 
-  const attendance = att.kept, removed = att.tombs;
-
   return {
     // 시작일은 "가장 이른 기록"이 진실이므로 최신 우선이 아니라 최소값을 쓴다
     startedAt: [a.startedAt, b.startedAt].filter(Boolean).sort()[0] || "",
-    attendance: attendance.sort(),
-    removed,
+    attendance: att.kept.sort(),
+    removed: att.tombs,
     // 벨트·단계 시작일은 이력에서 파생되므로 이력만 합치면 된다
     history: his.kept.map(d => histByDate.get(d)).sort((x, y) => x.date.localeCompare(y.date)),
     removedHistory: his.tombs,
@@ -1091,162 +1156,14 @@ function mergeStates(a, b) {
   };
 }
 
+/*
+ * "올릴 게 있는가"를 판정한다. 새 필드를 여기 넣는 걸 잊으면 그 필드를 고쳐도
+ * 변한 게 없다고 보고 Gist 에 push 하지 않는다. 메모 쪽 짝은 notes.js 의 sameNotes.
+ */
 function sameState(a, b) {
   const norm = s => JSON.stringify([s.epoch, s.startedAt, s.attendance, s.removed,
                                     s.history, s.removedHistory]);
   return norm(a) === norm(b);
-}
-
-/** 토큰으로 기존 Gist 를 찾고, 없으면 새로 만든다 */
-async function connectSync(token) {
-  sync.token = token.trim();
-  setSyncStatus("busy", "연결 중…");
-  try {
-    const list = await gh("/gists?per_page=100");
-    const found = list.find(g => g.files && g.files[GIST_FILE]);
-    if (found) {
-      sync.gistId = found.id;
-    } else {
-      const created = await gh("/gists", {
-        method: "POST",
-        body: JSON.stringify({
-          description: GIST_DESC, public: false,
-          files: { [GIST_FILE]: { content: JSON.stringify(state, null, 2) } }
-        })
-      });
-      sync.gistId = created.id;
-    }
-    saveSync();
-    await syncNow(true);
-    toast(found ? "기존 기록을 이어받았습니다" : "동기화를 시작합니다");
-  } catch (e) {
-    sync.token = ""; sync.gistId = "";
-    setSyncStatus("err", e.message);
-    render();
-  }
-}
-
-/** 원격을 읽어 병합하고, 달라진 게 있으면 올린다 */
-async function syncNow(manual = false) {
-  if (!syncOn()) return;
-  setSyncStatus("busy", "동기화 중…");
-  try {
-    const gist = await gh("/gists/" + sync.gistId);
-    const file = gist.files && gist.files[GIST_FILE];
-    let remote = null;
-    if (file) {
-      // 1MB 초과 시 content 가 잘리고 truncated=true — 이 앱 데이터 크기로는 사실상 없음
-      const text = file.truncated ? await (await fetch(file.raw_url)).text() : file.content;
-      try { remote = normalize(JSON.parse(text)); } catch (e) { remote = null; }
-    }
-
-    const merged = remote ? mergeStates(state, remote) : { ...state };
-    const localChanged = !sameState(state, merged);
-    const remoteChanged = !remote || !sameState(remote, merged);
-
-    if (localChanged) {
-      state = merged;
-      writeLocal();
-    }
-    if (remoteChanged) {
-      await gh("/gists/" + sync.gistId, {
-        method: "PATCH",
-        body: JSON.stringify({
-          description: GIST_DESC,
-          files: { [GIST_FILE]: { content: JSON.stringify(state, null, 2) } }
-        })
-      });
-    }
-
-    sync.lastSync = new Date().toISOString();
-    saveSync();
-    setSyncStatus("ok", "");
-    render();
-    if (manual) toast("동기화 완료");
-  } catch (e) {
-    setSyncStatus("err", e.message);
-    render();
-    if (manual) toast(e.message);
-  }
-}
-
-function scheduleSync() {
-  if (!syncOn()) return;
-  clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => syncNow(false), 1500);
-}
-
-/**
- * 초기화·복원처럼 "덮어쓰기"가 의도된 경우. 병합하면 지운 기록이 원격에서
- * 되돌아오므로 원격을 현재 상태로 밀어버린다.
- */
-async function saveOverwrite() {
-  state.updatedAt = new Date().toISOString();
-  writeLocal();
-  if (!syncOn()) return;
-  clearTimeout(syncTimer);
-  setSyncStatus("busy", "동기화 중…");
-  try {
-    await gh("/gists/" + sync.gistId, {
-      method: "PATCH",
-      body: JSON.stringify({
-        description: GIST_DESC,
-        files: { [GIST_FILE]: { content: JSON.stringify(state, null, 2) } }
-      })
-    });
-    sync.lastSync = new Date().toISOString();
-    saveSync();
-    setSyncStatus("ok", "");
-  } catch (e) {
-    setSyncStatus("err", e.message);
-    toast(e.message);
-  }
-  render();
-}
-
-function disconnectSync() {
-  if (!confirm("연결을 해제합니다. Gist에 저장된 기록은 남아 있고, 같은 토큰으로 다시 연결할 수 있습니다.")) return;
-  sync = { token: "", gistId: "", lastSync: "" };
-  localStorage.removeItem(SYNC_KEY);
-  $("syncToken").value = "";
-  setSyncStatus("off", "");
-  render();
-  toast("연결을 해제했습니다");
-}
-
-function setSyncStatus(kind, msg) {
-  syncStatus = { kind, msg };
-  renderSync();
-}
-
-function fmtSince(iso) {
-  if (!iso) return "";
-  const diff = Math.floor((new Date() - new Date(iso)) / 1000);
-  if (diff < 60) return "방금";
-  if (diff < 3600) return Math.floor(diff / 60) + "분 전";
-  if (diff < 86400) return Math.floor(diff / 3600) + "시간 전";
-  return Math.floor(diff / 86400) + "일 전";
-}
-
-function renderSync() {
-  const on = syncOn();
-  $("syncSetup").hidden = on;
-  $("syncActive").hidden = !on;
-
-  const box = $("syncState");
-  const k = syncStatus.kind;
-  box.className = "sync-state" + (on || k === "err" || k === "busy" ? " " + k : "");
-
-  let msg;
-  if (k === "busy") msg = syncStatus.msg || "동기화 중…";
-  else if (k === "err") msg = syncStatus.msg;
-  else if (on) msg = "깃허브 Gist에 백업 중" + (sync.lastSync ? ` · ${fmtSince(sync.lastSync)}` : "");
-  else msg = "이 기기에만 저장됨 — 백업 안 됨";
-  $("syncMsg").textContent = msg;
-
-  $("footNote").textContent = on
-    ? "기록이 깃허브 Gist에 백업됩니다. 다른 기기에서 같은 토큰으로 연결하면 이어집니다."
-    : "데이터는 이 브라우저에만 저장됩니다. 설정에서 깃허브에 연결하거나 백업 파일을 받아 두세요.";
 }
 
 let toastTimer = null;
@@ -1257,7 +1174,6 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
 }
-
 
 /* ============================================================
    날짜 선택기 — 네이티브 date 입력은 시작 요일을 브라우저 로케일이 정해
@@ -1326,7 +1242,6 @@ function renderPicker() {
     grid.appendChild(btn);
   }
 }
-
 
 /* ============================================================
    공유 — 카드 미리보기 후 내보내기
@@ -1433,121 +1348,3 @@ async function copyShareLink() {
     prompt("아래 주소를 복사하세요", SHARE_URL);
   }
 }
-
-/* ============================================================
-   이벤트 바인딩
-   ============================================================ */
-
-$("btnShare").onclick = () => openShare("summary");
-$("btnShareSend").onclick = sendShare;
-$("btnShareSave").onclick = () => { saveShare(); toast("이미지를 저장했습니다"); };
-$("btnShareLink").onclick = copyShareLink;
-$("btnShareClose").onclick = closeShare;
-$("shareBack").onclick = closeShare;
-
-$("setStarted").dataset.clearable = "1";        // 주짓수 시작일은 비울 수 있다
-[$("setStarted"), $("histDate")].forEach(inp => { inp.onclick = () => openPicker(inp); });
-$("picker").querySelectorAll("[data-nav]").forEach(b => {
-  b.onclick = () => {
-    pickerCursor = addMonths(new Date(pickerCursor.getFullYear(), pickerCursor.getMonth(), 1),
-                             Number(b.dataset.nav));
-    renderPicker();
-  };
-});
-$("pickerToday").onclick = () => commitPicker(key(today()));
-$("pickerClear").onclick = () => commitPicker("");
-$("pickerClose").onclick = closePicker;
-$("pickerBack").onclick = closePicker;
-document.addEventListener("keydown", e => {
-  if (e.key !== "Escape") return;
-  if (!$("shareBox").hidden) closeShare(); else closePicker();
-});
-
-$("calPrev").onclick = () => {
-  calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() - 1, 1);
-  renderCalendar();
-};
-$("calNext").onclick = () => {
-  calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() + 1, 1);
-  renderCalendar();
-};
-
-$("setStarted").onchange = e => {
-  const v = e.target.value;
-  if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { e.target.value = state.startedAt; return; }
-  if (v && parseKey(v) > today()) {
-    alert("주짓수 시작일은 오늘 이후일 수 없습니다.");
-    e.target.value = state.startedAt;
-    return;
-  }
-  state.startedAt = v;                       // 빈 값이면 미설정으로 되돌린다
-  save(); render();
-};
-
-/**
- * 폼이 열리면 여는 버튼을 숨긴다.
- * 버튼을 「닫기」로 바꿔 두면 폼 안의 「취소」와 닫는 방법이 둘이 되고,
- * 여는 버튼이 폼 머리처럼 남아 어색하다.
- */
-function toggleHistForm(open) {
-  const f = $("histForm");
-  f.hidden = !open;
-  const btn = $("btnAddHist");
-  btn.hidden = open;
-  btn.setAttribute("aria-expanded", String(open));
-  if (!open) return;
-
-  // 기본값: 오늘 + 다음 그랄/벨트. 지난 승급이면 날짜만 바꾸면 된다
-  const cur = currentRank();
-  const nx = nextOf(cur.belt, cur.stripe);
-  $("histDate").value = key(today());
-  form = { belt: nx.belt, stripe: nx.stripe };
-  renderForm();
-  renderHistEffect();
-}
-
-$("btnAddHist").onclick = () => toggleHistForm($("histForm").hidden);
-$("histDate").onchange = renderHistEffect;
-$("btnHistSave").onclick = recordPromotion;
-$("btnHistCancel").onclick = () => toggleHistForm(false);
-
-$("btnExport").onclick = exportData;
-$("btnImport").onclick = () => $("fileImport").click();
-$("fileImport").onchange = e => {
-  const f = e.target.files[0];
-  if (f) importData(f);
-  e.target.value = "";
-};
-$("btnReset").onclick = resetAll;
-
-$("btnConnect").onclick = () => {
-  const t = $("syncToken").value.trim();
-  if (!t) { toast("토큰을 붙여넣어 주세요"); return; }
-  connectSync(t);
-};
-$("syncToken").onkeydown = e => { if (e.key === "Enter") $("btnConnect").click(); };
-$("btnSyncNow").onclick = () => syncNow(true);
-$("btnGistOpen").onclick = () =>
-  window.open("https://gist.github.com/" + sync.gistId, "_blank", "noopener");
-$("btnDisconnect").onclick = disconnectSync;
-
-// 앱으로 돌아올 때: 날짜 기준을 갱신하고, 다른 기기의 변경을 가져온다
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return;
-  render();
-  if (syncOn() && (!sync.lastSync || new Date() - new Date(sync.lastSync) > 60000)) {
-    syncNow(false);
-  }
-});
-
-/* ============================================================
-   시작
-   ============================================================ */
-
-loadSync();
-if (!load()) {
-  save();                                  // 첫 실행: 기본값 저장
-  $("settings").open = true;               // 벨트/시작일부터 설정하도록 안내
-}
-render();
-if (syncOn()) syncNow(false);              // 다른 기기에서 올린 기록 반영

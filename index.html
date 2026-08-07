@@ -13,7 +13,7 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="mainView">
 
   <header>
     <div class="belt-mount belt-lg">
@@ -25,9 +25,16 @@
   <!-- 캘린더 -->
   <div class="card">
     <div class="cal-head">
-      <button id="calPrev" aria-label="이전 달">‹</button>
-      <div class="m" id="calMonth">–</div>
-      <button id="calNext" aria-label="다음 달">›</button>
+      <!-- 월 이동을 한 덩어리로 묶어야 오른쪽에 버튼이 붙어도 월 표시가 자리를 지킨다 -->
+      <div class="cal-nav">
+        <button id="calPrev" aria-label="이전 달">‹</button>
+        <div class="m" id="calMonth">–</div>
+        <button id="calNext" aria-label="다음 달">›</button>
+      </div>
+      <button type="button" id="btnNote" class="icon-btn" aria-label="메모 쓰기">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><path fill="currentColor"
+          d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+      </button>
     </div>
     <p class="today-line" id="todayLine"></p>
     <div class="cal-grid" id="calGrid"></div>
@@ -36,6 +43,20 @@
       <span><i style="background:#2c5b41"></i>이전 단계 출석</span>
       <span><i style="background:var(--warn)"></i>승급일</span>
       <span><i class="leg-cer"></i>승급식(매월 마지막 금)</span>
+      <span><i class="leg-note"></i>메모</span>
+    </div>
+
+    <!--
+      이 달의 메모. 달력 칸의 표식과 같은 것을 가리키므로 같은 카드에 둔다.
+      격자 아래라 달을 넘겨도 칸과 이동 버튼은 제자리에 있다.
+    -->
+    <div class="month-notes">
+      <div class="mn-head">
+        <span class="mn-title" id="mnTitle">–</span>
+        <button type="button" class="linkbtn" id="btnAllNotes" hidden>전체 메모 →</button>
+      </div>
+      <div class="note-list" id="monthNoteList"></div>
+      <button type="button" class="btn-ghost note-more" id="monthNoteMore" hidden></button>
     </div>
   </div>
 
@@ -232,6 +253,8 @@
               출석을 체크하면 자동으로 올라갑니다. 두 기기에서 따로 체크한 경우 출석 날짜는 합쳐집니다
               (한쪽에서 취소한 날짜가 다른 기기 기록에 남아 있으면 되살아날 수 있습니다).
               벨트·그랄·시작일은 마지막에 수정한 기기 값이 적용됩니다.
+              메모는 <b>따로 저장</b>되어 출석을 체크할 때 함께 올라가지 않으며,
+              같은 날짜를 양쪽에서 고쳤다면 나중에 저장한 내용이 남습니다.
             </p>
           </div>
         </div>
@@ -255,6 +278,90 @@
   </div>
 
   <p id="footNote" style="text-align:center;font-size:11px;color:#4d5462;margin-top:22px"></p>
+</div>
+
+<!--
+  전체 메모 — 모달이 아니라 화면이다. 오래 머무는 곳이라 겹침 스택에서 빼냈고,
+  덕분에 목록 높이를 고정할 이유(모달 가운데 정렬이라 결과 수에 따라 튀는 것)도 사라졌다.
+-->
+<div class="wrap page" id="notesPage" hidden>
+  <!--
+    헤더와 연도 점프바를 한 덩어리로 붙여 둔다. 월 머리글이 이 아래에 겹쳐 붙어야 하는데,
+    연도를 펴면 높이가 변하므로 그 높이를 JS 가 --notes-stick 으로 알려 준다.
+  -->
+  <div class="page-top" id="notesTop">
+    <div class="page-head">
+      <button type="button" id="btnNotesBack" class="icon-btn" aria-label="돌아가기">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><path fill="currentColor"
+          d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <h1 class="page-title" id="allNotesTitle">전체 메모</h1>
+      <!--
+        날짜로 이동. 연도를 칩으로 늘어놓으면 20년차에 네 줄이 되어 고정 영역이 화면의 절반을
+        먹는다. 버튼 하나로 접어 두면 연도 수와 무관하게 높이가 일정하다.
+      -->
+      <button type="button" id="btnJump" class="icon-btn" aria-label="날짜로 이동"
+              aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><path fill="currentColor"
+          d="M19 3h-1V1h-2v2H8V1H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H5V8h14v11z"/></svg>
+      </button>
+      <button type="button" id="btnNotesNew" class="icon-btn" aria-label="메모 쓰기">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><path fill="currentColor"
+          d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+      </button>
+
+      <!--
+        연도와 월이 한 패널에. 열면 최신 해가 이미 펼쳐져 있어 흔한 경우는 두 번 탭이면 된다.
+        .page-head 안에 둬야 버튼 바로 아래로 떨어진다 — .page-top 의 자식이면
+        분류·검색까지 지난 100px 아래에서 열려 어느 버튼이 연 것인지 알기 어렵다.
+      -->
+      <div class="jump-panel" id="jumpPanel" hidden>
+        <div class="jump-years" id="jumpYears"></div>
+        <div class="jump-months" id="jumpMonths"></div>
+      </div>
+    </div>
+    <div class="tag-choices" id="noteFilters"></div>
+    <input type="text" id="noteSearch" placeholder="메모 검색" autocomplete="off"
+           spellcheck="false">
+  </div>
+  <div class="note-list grouped" id="noteList"></div>
+</div>
+
+<!-- 메모 팝업. 안에서 날짜 선택기를 열므로 선택기(60/61)보다 아래에 깔린다 -->
+<div class="picker-back" id="noteBack" hidden></div>
+<div class="picker note" id="noteBox" hidden role="dialog" aria-label="메모">
+  <div class="picker-title" id="noteTitle">메모</div>
+
+  <!-- 보기 — 목록에서 눌러 들어오면 여기부터. 읽으려고 연 것을 실수로 고치지 않도록 -->
+  <div id="noteView" hidden>
+    <div class="nv-head"><span class="note-tag" id="noteViewTag"></span></div>
+    <div class="nv-body" id="noteViewText"></div>
+  </div>
+
+  <!-- 편집 — 연필로 새로 쓰거나 보기에서 「편집」을 누르면 -->
+  <div id="noteEdit" hidden>
+    <div class="field" style="margin-top:12px">
+      <label>날짜</label>
+      <input type="text" id="noteDate" class="datefield" readonly>
+    </div>
+    <div class="pickrow">
+      <div class="picklabel picklabel-row">
+        <span>분류</span>
+        <button type="button" class="linkbtn" id="btnTagEdit">편집</button>
+      </div>
+      <div class="tag-choices" id="noteTags"></div>
+    </div>
+    <textarea id="noteText" rows="5" maxlength="500"
+              placeholder="오늘 배운 것, 세미나·대회, 본 영상, 혼자 깨달은 것…"></textarea>
+    <div class="note-count"><span id="noteCount">0</span> / 500</div>
+  </div>
+
+  <div class="picker-foot">
+    <button type="button" id="btnNoteEdit" hidden>편집</button>
+    <button type="button" id="btnNoteSave" hidden>저장</button>
+    <button type="button" class="btn-danger" id="btnNoteDelete" hidden>삭제</button>
+    <button type="button" class="btn-ghost" id="btnNoteClose">닫기</button>
+  </div>
 </div>
 
 <div class="picker-back" id="shareBack" hidden></div>
@@ -291,7 +398,14 @@
 
 <div class="toast" id="toast"></div>
 
+<!--
+  일반 스크립트라 전역을 공유한다. 순서가 중요한 건 main.js 하나뿐 —
+  최상위에서 $ 를 쓰므로 반드시 마지막이다. 나머지는 서로를 호출 시점에만 참조한다.
+-->
 <script src="app.js"></script>
+<script src="notes.js"></script>
+<script src="sync.js"></script>
 <script src="share-card.js"></script>
+<script src="main.js"></script>
 </body>
 </html>
