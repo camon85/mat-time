@@ -99,6 +99,21 @@ with sync_playwright() as p:
     pg.wait_for_selector("#sharePreview[src]")
     pg.wait_for_timeout(400)
     shot(pg, "share", "#shareBox")
+    pg.click("#btnShareClose")
+    pg.wait_for_timeout(250)
+
+    # 9. 승급 추적 설정 — 기본이 꺼짐이라 "이런 게 있다"를 그림으로 알려야 한다.
+    #    샘플은 켜진 상태이므로 켜진 모습으로 찍힌다.
+    #    .sync-box 는 좌우 여백을 바깥 카드에서 받으므로, 요소만 찍으면 글자가 가장자리에 붙는다.
+    #    카드가 주던 여백을 잠깐 흉내내 화면과 같은 모양으로 찍는다
+    pg.evaluate("""() => {
+      settings.open = true;
+      const box = document.querySelector('.sync-box:has(#setTrack)');
+      box.style.padding = '16px';
+      box.style.borderTop = 'none';
+    }""")
+    pg.wait_for_timeout(250)
+    shot(pg, "tracking", ".sync-box:has(#setTrack)")
 
     b.close()
 

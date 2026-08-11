@@ -4,12 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e1116">
+<meta name="description" content="달력에서 오늘 톡. 다음 그랄까지 얼마나 남았는지 알려주는 주짓수 출석 트래커. 설치도 가입도 없이 바로 씁니다.">
+<!-- apple- 접두사는 iOS 전용이고 표준에서 밀려났다. 표준 이름을 함께 둔다 -->
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <!-- 홈 화면에 추가했을 때의 라벨. 없으면 title 전체가 쓰여 잘린다 -->
 <meta name="apple-mobile-web-app-title" content="Mat Time">
 <meta name="application-name" content="Mat Time">
 <title>Mat Time — 주짓수 출석 트래커</title>
+<!--
+  매일 여는 앱이라 홈 화면에 두는 것이 전제다. manifest 가 없으면 안드로이드에서 standalone
+  설치가 안 되고, apple-touch-icon 이 없으면 iOS 가 페이지 스크린샷을 아이콘으로 쓴다.
+-->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -40,9 +50,14 @@
     <div class="cal-grid" id="calGrid"></div>
     <div class="cal-legend">
       <span><i style="background:var(--accent)"></i>출석</span>
-      <span><i style="background:#2c5b41"></i>이전 단계 출석</span>
+      <!--
+        마지막 승급일 이전의 출석. 승급 «날짜»에만 기대므로 추적을 꺼도 남는다 —
+        그래서 「단계」라는 말을 쓰지 않는다. 추적이 꺼진 화면엔 단계라는 개념이 없다.
+      -->
+      <span><i style="background:#2c5b41"></i>승급 전 출석</span>
       <span><i style="background:var(--warn)"></i>승급일</span>
-      <span><i class="leg-cer"></i>승급식(매월 마지막 금)</span>
+      <!-- 승급식 날짜는 체육관 규정이라 추적을 켠 경우에만 표시한다 -->
+      <span id="legCeremony" hidden><i class="leg-cer"></i>승급식(매월 마지막 금)</span>
       <span><i class="leg-note"></i>메모</span>
     </div>
 
@@ -95,8 +110,11 @@
     </div>
   </div>
 
-  <!-- 승급 진행도 -->
-  <div class="card">
+  <!--
+    승급 진행도 — 체육관 기준(3개월/30일 · 7개월/90일, 매월 마지막 금요일 승급식)에 기대므로
+    기준이 다른 곳에서는 숫자가 틀린다. 설정에서 켠 경우에만 보인다 (기본 꺼짐).
+  -->
+  <div class="card" id="goalCard" hidden>
     <div class="goal-head">
       <div class="goal-next" id="goalBelt">
         <span class="goal-word">다음</span>
@@ -129,8 +147,8 @@
     <div class="ready" id="readyBox"></div>
   </div>
 
-  <!-- 로드맵 -->
-  <div class="card">
+  <!-- 로드맵 — 벨트별 승급 기준을 적으므로 진행도와 같이 켜지고 꺼진다 -->
+  <div class="card" id="roadCard" hidden>
     <div class="road-head">
       <div class="belt-mount belt-sm">
         <div class="belt-bar is-black" id="roadGoalBelt" style="background:#14161a">
@@ -163,14 +181,38 @@
           비워 두면 표시하지 않으며, 승급 진행도 계산에는 쓰이지 않습니다.
         </p>
 
+        <!--
+          승급 추적은 승급 이력과 **별개**다. 이력을 남기는 것(=지금 벨트를 아는 것)과
+          다음 승급을 예측하는 것은 다른 일이고, 후자만 체육관 규정에 기댄다.
+        -->
+        <div class="sync-box">
+          <label class="toggle" for="setTrack">
+            <input type="checkbox" id="setTrack">
+            <span class="switch" aria-hidden="true"></span>
+            <span class="toggle-label">승급 진행도 추적</span>
+          </label>
+          <p class="hint" style="margin-top:10px">
+            다음 승급까지 남은 <b>기간·출석 일수</b>와 <b>예상 승급식</b>을 계산해 보여줍니다
+            («다음 벨트까지 N%» 카드와 «블랙까지» 로드맵).
+          </p>
+          <p class="hint">
+            <b>3개월/30일 · 7개월/90일, 매월 마지막 금요일 승급식</b> 기준입니다.
+            다니는 체육관 규정이 다르면 숫자가 맞지 않으니 꺼 두세요.
+          </p>
+          <p class="hint">
+            꺼도 <b>승급 이력은 그대로 기록</b>됩니다. 벨트 표시, 달력의 승급일 점,
+            잔디의 승급 칸도 그대로예요. 나중에 다시 켜면 그동안의 기록으로 바로 계산됩니다.
+          </p>
+        </div>
+
         <!-- 승급 기록 — 오늘 받은 것도, 지난 승급도 같은 폼으로 -->
         <div class="sync-box">
           <h2 style="margin-bottom:8px">승급 이력</h2>
           <p class="hint">
-            <b>현재 벨트·그랄과 단계 시작일은 이 이력에서 나옵니다.</b>
-            가장 최근 기록이 곧 지금 상태이고, 그 날짜부터 다음 승급 기준을 셉니다.
-            지금 벨트를 맞추려면 마지막으로 승급한 날을 기록하세요.
-            항목을 지우면 자동으로 직전 상태로 돌아갑니다. 출석 기록은 그대로 보존됩니다.
+            <b>현재 벨트·그랄은 이 이력에서 나옵니다.</b>
+            가장 최근 기록이 곧 지금 상태입니다. 지금 벨트를 맞추려면 마지막으로 승급한 날을
+            기록하세요. 항목을 지우면 자동으로 직전 상태로 돌아가고, 출석 기록은 그대로 보존됩니다.
+            <b>위 «승급 진행도 추적»과는 별개</b>라, 꺼 둔 채로도 이력은 얼마든지 남길 수 있습니다.
           </p>
           <div class="hist" id="histList"></div>
 
@@ -250,9 +292,9 @@
               <button class="btn-ghost" id="btnDisconnect">연결 해제</button>
             </div>
             <p class="hint" style="margin-top:10px">
-              출석을 체크하면 자동으로 올라갑니다. 두 기기에서 따로 체크한 경우 출석 날짜는 합쳐집니다
-              (한쪽에서 취소한 날짜가 다른 기기 기록에 남아 있으면 되살아날 수 있습니다).
-              벨트·그랄·시작일은 마지막에 수정한 기기 값이 적용됩니다.
+              출석을 체크하면 자동으로 올라갑니다. 두 기기에서 따로 체크한 날짜는 합쳐지고,
+              <b>한쪽에서 취소한 날짜는 다른 기기에서도 취소</b>됩니다 (승급 이력·분류도 같습니다).
+              시작일은 더 이른 날짜가 남습니다.
               메모는 <b>따로 저장</b>되어 출석을 체크할 때 함께 올라가지 않으며,
               같은 날짜를 양쪽에서 고쳤다면 나중에 저장한 내용이 남습니다.
             </p>
@@ -396,7 +438,8 @@
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<!-- 안내가 화면에만 뜨면 스크린리더 사용자에게는 아무 일도 안 일어난 것과 같다 -->
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <!--
   일반 스크립트라 전역을 공유한다. 순서가 중요한 건 main.js 하나뿐 —

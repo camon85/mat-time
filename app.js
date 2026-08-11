@@ -102,13 +102,24 @@ const NOTES_KEY = "bjj-notes";
  * 현재 벨트·그랄·단계 시작일은 따로 저장하지 않는다. 승급 이력(history)의
  * 마지막 항목에서 파생한다 — "단계 시작일"과 "승급일"이 같은 사실이기 때문.
  */
+/*
+ * 승급 추적은 옵션이고 **기본은 꺼짐**이다.
+ *
+ * 승급 이력을 남기는 것(= 지금 벨트가 무엇인지)과 다음 승급을 예측하는 것은 다른 일인데,
+ * 후자만 체육관 규정(3개월/30일 · 7개월/90일, 매월 마지막 금요일)에 기댄다. 규정이 다른
+ * 곳에서는 진행도·예상 승급식이 그냥 틀린 숫자다. 그래서 이력 유무로 추론하지 않고
+ * 명시적으로 켠 경우에만 켠다 — "이력이 있으니 추적도 원하겠지" 가 성립하지 않기 때문이다.
+ */
 let state = {
   startedAt: "",        // 주짓수를 처음 시작한 날. 비어 있으면 미설정
+  trackPromotion: false,  // 승급 진행도·로드맵·승급식 표시를 켤지
+  trackPromotionAt: "",   // 그 값을 마지막으로 바꾼 시각(ISO). 병합에서 늦은 쪽이 이긴다
   attendance: [],       // "YYYY-MM-DD" 배열 (정렬·중복 제거 유지)
+  checked: {},          // 출석을 켠 날짜 → 켠 시각(ISO). attendance 의 부분집합 (§withAt)
   removed: {},          // 출석을 취소한 날짜 → 취소 시각(ISO). 다시 체크하면 키 삭제
-  history: [],          // { date, belt, stripe } — 승급 이력. 날짜 오름차순
+  history: [],          // { date, belt, stripe, at } — 승급 이력. 날짜 오름차순
   removedHistory: {},   // 삭제한 승급일 → 삭제 시각(ISO). 없으면 동기화가 삭제를 되살린다
-  updatedAt: "",        // ISO 문자열. 병합 시 승자 판정 기준
+  updatedAt: "",        // ISO 문자열. 마지막 변경 시각(표시·보조용)
   epoch: 0              // 복원·초기화 세대. 항목별 툼스톤으로 표현할 수 없는 "전체 교체"를 나타낸다
 };
 
@@ -122,18 +133,38 @@ function currentRank() {
   return { belt: last.belt, stripe: last.stripe, since: last.date };
 }
 
+/**
+ * 저장된 코어 문서를 읽는다. "ok" | "empty" | "corrupt".
+ *
+ * 손상을 빈 문서와 구분하는 이유: 예전에는 둘 다 false 를 돌려줬고 호출부가 곧바로 save() 로
+ * 덮어써서, 읽지 못한 원본이 그 자리에서 사라졌다. 동기화를 안 켠 사용자에게는 그게 곧
+ * 전체 유실이다. 지금은 원본을 따로 옮겨 두고 복구 여지를 남긴다.
+ */
 function load() {
+  const raw = localStorage.getItem(STORE_KEY);
+  if (!raw) return "empty";
   try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return false;
     const d = JSON.parse(raw);
-    if (!d || typeof d !== "object") return false;
+    if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("객체가 아님");
     state = normalize(d);
-    return true;
+    return "ok";
   } catch (e) {
     console.warn("저장된 데이터를 읽지 못했습니다", e);
-    return false;
+    stashCorrupt(STORE_KEY, raw);
+    return "corrupt";
   }
+}
+
+/** 읽지 못한 원본을 지우지 않고 옆으로 옮긴다. 옮기지 못하면 원본을 그대로 둔다 */
+function stashCorrupt(storeKey, raw) {
+  const backupKey = storeKey + "-corrupt";
+  try {
+    localStorage.setItem(backupKey, raw);
+    localStorage.removeItem(storeKey);
+  } catch (e) {
+    console.warn("손상 데이터를 옮기지 못했습니다", e);
+  }
+  return backupKey;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -153,7 +184,16 @@ function stampMap(src, okKey) {
   return o;
 }
 
+/**
+ * 항목별 시각을 붙인다. **빈 시각은 아예 넣지 않는다** — 없는 것과 뜻이 같기 때문이다
+ * (병합에서 둘 다 "가장 오래된 것"으로 취급된다).
+ * 첫 실행처럼 문서 시각조차 없는 순간에 `at: ""` 를 남기면, 그 문서를 내보낸 백업이
+ * 자기 검증(`at 이 비어 있습니다`)에 걸린다. normalizeNotes 도 같은 것을 쓴다.
+ */
+const withAt = (obj, at) => (at ? { ...obj, at } : obj);
+
 function normalize(d) {
+  const updatedAt = typeof d.updatedAt === "string" ? d.updatedAt : "";
   const att = Array.isArray(d.attendance)
     ? [...new Set(d.attendance.filter(s => typeof s === "string" && DATE_RE.test(s)))].sort()
     : [];
@@ -165,18 +205,40 @@ function normalize(d) {
         .filter(h => h && DATE_RE.test(h.date))
         .map(h => {
           const b = clamp(Number(h.belt) || 0, 0, BLACK);
-          return [h.date, { date: h.date, belt: b,
-                            stripe: b >= BLACK ? 0 : clamp(Number(h.stripe) || 0, 0, MAX_STRIPE) }];
+          // at 은 삭제 툼스톤과 겨룰 값 (메모의 at 과 같은 역할). 없으면 문서 시각으로 확정한다
+          return [h.date, withAt({ date: h.date, belt: b,
+                                   stripe: b >= BLACK ? 0 : clamp(Number(h.stripe) || 0, 0, MAX_STRIPE) },
+                                 (typeof h.at === "string" && h.at) ? h.at : updatedAt)];
         })).values()].sort((a, b) => a.date.localeCompare(b.date))
     : [];
+
   // 켜진 날짜와 끈 날짜가 겹치면 취소가 이긴다 (재체크 시 removed 키를 지우므로)
+  const attendance = att.filter(k => !rem[k]);
+
+  /*
+   * 켠 시각을 여기서 **반드시 채워 둔다.** 없는 것을 병합 때 문서의 updatedAt 으로 대신하면,
+   * 그 기기가 무엇이든 고칠 때마다 살아 있는 모든 날짜의 주장 시각이 함께 밀려
+   * 상대의 취소 툼스톤을 통째로 이긴다 (= 지운 출석이 되살아난다).
+   * 옛 문서에는 값이 없으므로 문서 시각으로 한 번만 확정하고, 이후 토글은 자기 시각을 갖는다.
+   */
+  const chk = stampMap(d.checked);
+  const checked = {};
+  for (const k of attendance) {
+    const at = chk[k] || updatedAt;
+    if (at) checked[k] = at;           // 빈 시각은 넣지 않는다 (withAt 주석 참조)
+  }
+
   return {
     startedAt: DATE_RE.test(d.startedAt) ? d.startedAt : "",
-    attendance: att.filter(k => !rem[k]),
+    // 값이 없으면 꺼짐. 이력이 있는지로 추론하지 않는다 — 이력과 추적은 별개의 의사다
+    trackPromotion: d.trackPromotion === true,
+    trackPromotionAt: typeof d.trackPromotionAt === "string" ? d.trackPromotionAt : "",
+    attendance,
+    checked,
     removed: rem,
     history: hist.filter(h => !remHist[h.date]),
     removedHistory: remHist,
-    updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : "",
+    updatedAt,
     epoch: Number.isInteger(d.epoch) && d.epoch >= 0 ? d.epoch : 0
   };
 }
@@ -214,15 +276,18 @@ function hasAttended(k) {
  */
 function toggleDay(k) {
   if (parseKey(k) > today()) return;
+  const now = new Date().toISOString();
   const i = state.attendance.indexOf(k);
   if (i >= 0) {
     state.attendance.splice(i, 1);
-    state.removed[k] = new Date().toISOString();
+    delete state.checked[k];
+    state.removed[k] = now;
     toast(fmtShort(k) + " 출석 취소");
   } else {
     state.attendance.push(k);
     state.attendance.sort();
     delete state.removed[k];
+    state.checked[k] = now;          // 이 날짜를 켠 시각 — 병합에서 취소 시각과 겨룬다
     toast(fmtShort(k) + " 출석 완료 💪");
   }
   save();
@@ -359,6 +424,10 @@ function recentPerWeek() {
 }
 
 function renderGoal() {
+  // 꺼져 있으면 카드째 숨긴다. 계산은 전부 이 안에 있으므로 도는 일도 없다
+  $("goalCard").hidden = !state.trackPromotion;
+  if (!state.trackPromotion) return;
+
   const { belt, stripe, since } = currentRank();
   const req = requirementOf(belt, stripe);
   const from = parseKey(since);
@@ -450,14 +519,17 @@ function renderGoal() {
   }
 }
 
-/** 목표 승급식까지 주당 몇 회 나가야 출석 조건을 채우는지 */
+/**
+ * 목표 승급식까지 주당 몇 회 나가야 출석 조건을 채우는지.
+ *
+ * 「주 8.5회 필요」 같은 불가능한 안내는 여기서 막는 게 아니라 호출부에서 이미 막혀 있다 —
+ * 목표 승급식이 `오늘 + 남은 일수` 이후로 잡히므로 daysToCeremony ≥ remainDays 이고,
+ * 따라서 perWeek 은 7 을 넘을 수 없다. (예전엔 여기 `> 7` 분기가 있었는데 도달할 수 없었다)
+ */
 function pacingHint(remainDays, daysToCeremony) {
   if (remainDays <= 0) return "";
   if (daysToCeremony <= 0) return "";
-  const weeks = daysToCeremony / 7;
-  const perWeek = remainDays / weeks;
-  // 주 7회를 넘으면 그 승급식엔 물리적으로 불가능
-  if (perWeek > 7) return " · 다음 승급식엔 불가능";
+  const perWeek = remainDays / (daysToCeremony / 7);
   if (perWeek <= 0.5) return "";
   return ` · 승급식까지 주 ${perWeek.toFixed(1)}회`;
 }
@@ -484,7 +556,9 @@ function renderCalendar() {
 
   const tk = key(today());
   const since = currentRank().since;
-  const ceremonyK = key(lastFridayOf(y, m));
+  // 승급식 날짜는 체육관 규정이라 추적을 켠 경우에만 표시한다. "" 는 어떤 날짜와도 안 맞는다
+  const ceremonyK = state.trackPromotion ? key(lastFridayOf(y, m)) : "";
+  $("legCeremony").hidden = !state.trackPromotion;
   const promo = new Set(state.history.map(h => h.date));
 
   /*
@@ -499,18 +573,21 @@ function renderCalendar() {
     const d = addDays(gridStart, i);
     const dk = key(d);
     const other = d.getMonth() !== m;
+    const future = dk > tk;
+    const on = hasAttended(dk);
     const btn = document.createElement("button");
     btn.type = "button";
 
     const cls = ["day"];
     if (other) cls.push("other");
-    if (hasAttended(dk)) cls.push("on");
+    if (on) cls.push("on");
     if (dk === tk) cls.push("today");
-    if (dk > tk) cls.push("future");
+    if (future) cls.push("future");
     if (dk <= since) cls.push("before-promo");                // 승급식 당일까지가 이전 단계
     if (dk === ceremonyK) cls.push("ceremony");
     btn.className = cls.join(" ");
     btn.textContent = d.getDate();
+    btn.dataset.d = dk;                                       // 롱프레스 위임이 읽는다
 
     if (promo.has(dk)) {
       const dot = document.createElement("span");
@@ -518,12 +595,30 @@ function renderCalendar() {
       btn.appendChild(dot);
     }
     // 메모 표식은 하단 중앙 — 우상단은 승급일 점이 쓴다
-    if (noteDoc.notes[dk]) {
+    const hasNote = !!noteDoc.notes[dk];
+    if (hasNote) {
       const mark = document.createElement("span");
       mark.className = "note-mark";
       btn.appendChild(mark);
     }
-    if (!other) btn.onclick = () => toggleDay(dk);
+
+    /*
+     * 스크린리더에는 숫자만 읽히면 "15" 로 끝나 무슨 날인지 알 수 없다.
+     * 날짜·요일과 상태를 함께 주고, 토글 버튼이므로 aria-pressed 를 쓴다.
+     */
+    if (other || future) {
+      // 누를 수 없는 칸은 탭 순서에서도 빼야 한다 (CSS 로는 클릭만 막힌다)
+      btn.disabled = true;
+      btn.setAttribute("aria-hidden", "true");
+      btn.tabIndex = -1;
+    } else {
+      const label = `${d.getMonth() + 1}월 ${d.getDate()}일 ${DOW[d.getDay()]}요일`;
+      btn.setAttribute("aria-label",
+        label + (hasNote ? " · 메모 있음" : "") + (promo.has(dk) ? " · 승급일" : ""));
+      btn.setAttribute("aria-pressed", String(on));
+      btn.title = "탭: 출석 체크 · 길게 누르기: 메모";
+      btn.onclick = () => { if (consumeLongPress()) return; toggleDay(dk); };
+    }
     grid.appendChild(btn);
   }
 
@@ -531,10 +626,108 @@ function renderCalendar() {
   const t = today();
   $("calNext").disabled = (y > t.getFullYear()) ||
                           (y === t.getFullYear() && m >= t.getMonth());
+}
 
-  // 달 아래 메모 목록도 여기서 갱신한다 — 월 이동 버튼은 이 함수만 부르므로
-  // 빼먹으면 달을 넘겨도 메모가 이전 달 것으로 남는다
+/**
+ * 달력과 그 아래 메모 목록은 같은 달을 가리키므로 함께 움직여야 한다.
+ * 월 이동은 이 함수를 부른다 — 예전엔 renderCalendar 안에서 메모를 갱신했는데,
+ * render() 가 renderCalendar 와 renderNotes 를 둘 다 부르는 바람에 매 렌더마다 두 번씩 그렸다.
+ */
+function renderCalendarMonth() {
+  renderCalendar();
   renderMonthNotes();
+}
+
+/** 달력이 볼 수 있는 마지막 달 (미래로는 못 간다) */
+const calMax = () => { const t = today(); return new Date(t.getFullYear(), t.getMonth(), 1); };
+
+/** 달 이동. 목록도 함께 옮기고 접힌 상태는 물고 가지 않는다 */
+function goMonth(delta) {
+  calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() + delta, 1);
+  monthLimit = MONTH_PAGE;
+  renderCalendarMonth();
+}
+
+/**
+ * 그 날짜가 있는 달로 달력을 옮기고 그 자리까지 스크롤한다 (잔디 칸을 눌렀을 때).
+ * 잔디는 달력 아래에 있으므로 결과가 화면 위쪽에서 벌어진다 — 옮기기만 하면 보이지 않는다.
+ */
+function goToMonth(dk) {
+  if (!DATE_RE.test(dk)) return;
+  const d = parseKey(dk);
+  const want = new Date(d.getFullYear(), d.getMonth(), 1);
+  calCursor = want > calMax() ? calMax() : want;
+  monthLimit = MONTH_PAGE;
+  renderCalendarMonth();
+
+  const card = $("calGrid").closest(".card");
+  card.scrollIntoView({ block: "start" });
+  // 순간이동이라 「눌렸다」는 신호가 없다. 도착한 카드를 잠깐 밝힌다 (메모 점프와 같은 방식)
+  card.classList.remove("flash");
+  void card.offsetWidth;
+  card.classList.add("flash");
+}
+
+/* ------------------------------------------------------------
+   달력 칸 길게 누르기 → 그날 메모
+
+   탭은 출석 토글이라 메모에 쓸 수 있는 동작이 롱프레스밖에 없다.
+   신경 쓸 것이 셋이다.
+
+   1. **롱프레스 뒤에 오는 click 을 반드시 먹어야 한다.** 안 그러면 메모를 열면서
+      출석까지 토글된다 — 이 기능에서 가장 치명적인 오작동이다
+   2. 스크롤 시작과 구분해야 한다 (10px 넘게 움직이면 취소)
+   3. contextmenu 를 막아야 한다. 안드로이드는 롱프레스에, 데스크톱은 우클릭에 뜬다.
+      iOS 의 선택 콜아웃은 CSS(-webkit-touch-callout)로 막는다
+   ------------------------------------------------------------ */
+
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP = 10;      // 이만큼 움직이면 스크롤로 본다
+
+let lpTimer = null, lpFired = false, lpX = 0, lpY = 0;
+
+/** 롱프레스가 방금 일어났으면 true 를 한 번만 돌려준다 (click 억제용) */
+function consumeLongPress() {
+  const fired = lpFired;
+  lpFired = false;
+  return fired;
+}
+
+function longPressStart(e) {
+  const btn = e.target.closest(".day[data-d]");
+  if (!btn || btn.disabled) return;
+  if (e.pointerType === "mouse" && e.button !== 0) return;   // 우클릭은 contextmenu 가 맡는다
+  lpFired = false;                                           // 새 누름이 시작되면 초기화
+  lpX = e.clientX; lpY = e.clientY;
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => {
+    lpTimer = null;
+    lpFired = true;
+    if (navigator.vibrate) navigator.vibrate(12);             // 눌렸다는 신호 (안드로이드)
+    openNote(btn.dataset.d);
+  }, LONG_PRESS_MS);
+}
+
+function longPressMove(e) {
+  if (!lpTimer) return;
+  if (Math.abs(e.clientX - lpX) > LONG_PRESS_SLOP ||
+      Math.abs(e.clientY - lpY) > LONG_PRESS_SLOP) longPressCancel();
+}
+
+function longPressCancel() {
+  clearTimeout(lpTimer);
+  lpTimer = null;
+}
+
+/** 안드로이드 롱프레스 메뉴 · 데스크톱 우클릭. 둘 다 여기서 메모로 돌린다 */
+function longPressMenu(e) {
+  const btn = e.target.closest(".day[data-d]");
+  if (!btn || btn.disabled) return;
+  e.preventDefault();
+  if (lpFired) return;              // 타이머가 이미 열었다 (안드로이드는 둘 다 뜬다)
+  longPressCancel();
+  lpFired = true;
+  openNote(btn.dataset.d);
 }
 
 /** 시작일로부터 지금까지를 "N년 M개월째" 로. 한 달 미만이면 일 단위 */
@@ -635,11 +828,14 @@ function renderHeatmap() {
     const dk = key(d);
     const cell = document.createElement("i");
     // 기록 이전은 "안 나간 날"이 아니라 "데이터 없음" — 빈칸과 구분해 더 어둡게
-    cell.className = d > t ? "future"
+    const future = d > t;
+    cell.className = future ? "future"
                    : promo.has(dk) ? "promo"
                    : on.has(dk) ? "on"
                    : dk < tracked ? "untracked" : "";
-    cell.title = dk;
+    cell.title = dk + (promo.has(dk) ? " · 승급" : on.has(dk) ? " · 출석" : "");
+    // 누르면 그 달로 달력을 옮긴다. 잔디에서 뭔가 발견했을 때 거기까지 스크롤로 찾아가지 않도록
+    if (!future) cell.dataset.d = dk;
     grid.appendChild(cell);
   }
   const shown = state.attendance.filter(k => k >= key(start) && k <= key(t)).length;
@@ -648,6 +844,9 @@ function renderHeatmap() {
 }
 
 function renderRoadmap() {
+  $("roadCard").hidden = !state.trackPromotion;
+  if (!state.trackPromotion) return;
+
   const { belt, stripe } = currentRank();
   const step = stepIndexOf(belt, stripe);
 
@@ -702,9 +901,23 @@ function renderRoadmap() {
 
 function renderSettings() {
   $("setStarted").value = state.startedAt;
+  $("setTrack").checked = state.trackPromotion;
   renderForm();
   renderHistory();
   renderHistEffect();
+}
+
+/**
+ * 승급 추적 켬/끔. **끄는 것은 숨기는 것일 뿐 지우는 것이 아니다** —
+ * 승급 이력·출석·메모는 그대로 남고, 다시 켜면 그동안의 기록으로 바로 계산된다.
+ */
+function setTracking(on) {
+  state.trackPromotion = !!on;
+  state.trackPromotionAt = new Date().toISOString();
+  save();
+  render();
+  toast(on ? "승급 진행도 추적을 켰습니다"
+           : "추적을 껐습니다 · 승급 이력은 그대로입니다");
 }
 
 /**
@@ -786,7 +999,7 @@ function renderHistEffect() {
   const show = html => { el.innerHTML = html; el.hidden = !html; };
 
   const date = $("histDate").value;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return show("승급일을 선택하세요.");
+  if (!DATE_RE.test(date)) return show("승급일을 선택하세요.");
   if (parseKey(date) > today()) return show("미래 날짜는 기록할 수 없습니다.");
 
   // 누르기 전에 알 수 있도록, 같은 등급이 이미 있으면 먼저 알린다
@@ -822,7 +1035,8 @@ function becomesCurrent(date) {
 /** 날짜를 키로 하는 upsert. 같은 날짜가 있으면 교체하고 항상 날짜순을 유지한다 */
 function putHistory(rec) {
   state.history = state.history.filter(h => h.date !== rec.date);
-  state.history.push(rec);
+  // at 은 "이 항목을 기록한 시각" — 병합에서 삭제 툼스톤과 겨룬다 (출석의 checked 와 같은 역할)
+  state.history.push({ ...rec, at: new Date().toISOString() });
   state.history.sort((a, b) => a.date.localeCompare(b.date));
   delete state.removedHistory[rec.date];      // 다시 기록하면 삭제 표시를 지운다
 }
@@ -836,7 +1050,7 @@ function recordPromotion() {
   const date = $("histDate").value;
   const { belt, stripe } = form;
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast("승급일을 선택하세요"); return; }
+  if (!DATE_RE.test(date)) { toast("승급일을 선택하세요"); return; }
   if (parseKey(date) > today()) { toast("미래 날짜는 기록할 수 없습니다"); return; }
   if (belt === 0 && stripe === 0) { toast("화이트 0그랄은 승급이 아니라 시작 상태입니다"); return; }
   const dup = state.history.find(h => h.date === date);
@@ -901,7 +1115,11 @@ function exportData() {
  */
 const BACKUP_FIELDS = {
   startedAt:      v => typeof v === "string",
+  // 옛 백업엔 없다. 없으면 꺼진 것으로 읽힌다
+  trackPromotion:   v => typeof v === "boolean",
+  trackPromotionAt: v => typeof v === "string",
   attendance:     v => Array.isArray(v),
+  checked:        v => v && typeof v === "object" && !Array.isArray(v),
   removed:        v => v && typeof v === "object" && !Array.isArray(v),
   history:        v => Array.isArray(v),
   removedHistory: v => v && typeof v === "object" && !Array.isArray(v),
@@ -913,7 +1131,14 @@ const BACKUP_FIELDS = {
   epoch:          v => Number.isInteger(v) && v >= 0
 };
 
-const isRank = v => Number.isInteger(v) && v >= 0 && v <= MAX_STRIPE;
+/*
+ * 벨트와 그랄은 범위가 다르다. 예전엔 하나로 겸했는데 MAX_STRIPE 와 BLACK 이 둘 다 4 인
+ * 우연에 기댄 것이라, 벨트를 하나만 늘려도 조용히 통과·거부가 뒤집힌다.
+ */
+const isBeltIdx = v => Number.isInteger(v) && v >= 0 && v <= BLACK;
+const isStripe  = v => Number.isInteger(v) && v >= 0 && v <= MAX_STRIPE;
+/** 있으면 비어 있지 않은 문자열이어야 하는 시각 필드 (옛 백업엔 없다) */
+const okOptAt = v => v === undefined || (typeof v === "string" && !!v);
 
 /** 시각 도장 맵({키: ISO})이 온전한지. 키 검사는 기본이 날짜, 분류 툼스톤만 okKey 를 준다 */
 function badStampMap(m, name, okKey) {
@@ -936,7 +1161,7 @@ function validateBackup(d) {
   if (badType.length) return `항목 형식이 올바르지 않습니다 — ${badType.join(", ")}`;
 
   const att = d.attendance || [], hist = d.history || [];
-  const rem = d.removed || {}, remHist = d.removedHistory || {};
+  const chk = d.checked || {}, rem = d.removed || {}, remHist = d.removedHistory || {};
   const notes = d.notes || {}, remNotes = d.removedNotes || {};
   const tags = d.tags || DEFAULT_TAGS, remTags = d.removedTags || {};
 
@@ -954,12 +1179,14 @@ function validateBackup(d) {
       return "history 에 객체가 아닌 항목이 있습니다.";
     if (!DATE_RE.test(h.date))
       return `history 의 date "${h.date}" 가 날짜 형식이 아닙니다.`;
-    if (!isRank(h.belt) || h.belt > BLACK)
+    if (!isBeltIdx(h.belt))
       return `history[${h.date}].belt 값이 0~${BLACK} 범위의 정수가 아닙니다.`;
-    if (!isRank(h.stripe))
+    if (!isStripe(h.stripe))
       return `history[${h.date}].stripe 값이 0~${MAX_STRIPE} 범위의 정수가 아닙니다.`;
     if (h.belt >= BLACK && h.stripe !== 0)
       return `history[${h.date}] — 블랙벨트에는 그랄이 없습니다.`;
+    if (!okOptAt(h.at))
+      return `history[${h.date}].at 이 비어 있습니다.`;
   }
   const hDates = hist.map(h => h.date);
   if (new Set(hDates).size !== hDates.length) return "history 에 중복된 승급일이 있습니다.";
@@ -980,6 +1207,7 @@ function validateBackup(d) {
       return `tags["${t.id}"].name 이 비어 있습니다.`;
     if (t.name.length > TAG_NAME_MAX)
       return `tags["${t.id}"].name 이 ${TAG_NAME_MAX}자를 넘습니다 (${t.name.length}자).`;
+    if (!okOptAt(t.at)) return `tags["${t.id}"].at 이 비어 있습니다.`;
     if (tagIds.has(t.id)) return `tags 에 중복된 id "${t.id}" 가 있습니다.`;
     tagIds.add(t.id);
   }
@@ -999,13 +1227,19 @@ function validateBackup(d) {
       return `notes["${k}"].at 이 비어 있습니다.`;
   }
 
-  const stampErr = badStampMap(rem, "removed") || badStampMap(remHist, "removedHistory")
+  const stampErr = badStampMap(chk, "checked") || badStampMap(rem, "removed")
+                   || badStampMap(remHist, "removedHistory")
                    || badStampMap(remNotes, "removedNotes")
                    || badStampMap(remTags, "removedTags", okTagId);
   if (stampErr) return stampErr;
 
   const dupT = [...tagIds].find(id => id in remTags);
   if (dupT) return `"${dupT}" 가 tags 와 removedTags 양쪽에 있습니다.`;
+
+  // checked 는 attendance 의 부분집합이어야 한다 — 아니면 normalize 가 조용히 버린다
+  const attSet = new Set(att);
+  const orphan = Object.keys(chk).find(k => !attSet.has(k));
+  if (orphan) return `checked["${orphan}"] 에 해당하는 출석이 attendance 에 없습니다.`;
 
   const dupA = att.find(k => k in rem);
   if (dupA) return `${dupA} 이 attendance 와 removed 양쪽에 있습니다.`;
@@ -1106,13 +1340,15 @@ function toggleHistForm(open) {
  * 존재 확인은 반드시 Set 으로 한다 — 배열 includes 를 날짜마다 부르면 O(n²) 이 되어
  * 10년치에서 수십 ms, 30년치에서 수백 ms 가 걸린다.
  *
- * atOf 를 주지 않으면 문서의 updatedAt 을 "켠 시각" 대용으로 쓴다 (변경 직후 곧바로
- * push 하므로 충분히 근사하다). 내용이 바뀌는 메모는 항목마다 시각을 갖고 있어 그쪽을 준다.
+ * atOf 는 **항목별 시각**을 돌려줘야 한다. 예전에는 이걸 생략하면 문서의 updatedAt 을
+ * 대용으로 썼는데, 그러면 그 기기가 무엇이든 고칠 때마다 살아 있는 모든 항목의 주장 시각이
+ * 함께 밀려 상대의 툼스톤을 전부 이긴다 — 「폰에서 지우고 나중에 PC 를 열어 오늘 체크」라는
+ * 가장 흔한 흐름에서 지운 것이 되살아났다. 지금은 출석·이력·분류 모두 자기 시각을 갖는다.
  */
 function pickByStamp(a, b, keysOf, tombOf, atOf) {
   const sa = new Set(keysOf(a)), sb = new Set(keysOf(b));
   const ta = tombOf(a), tb = tombOf(b);
-  const kept = [], tombs = {};
+  const kept = [], tombs = {}, stamps = {};
   for (const d of new Set([...sa, ...sb, ...Object.keys(ta), ...Object.keys(tb)])) {
     const sideOf = (s, set, t) =>
       t[d] ? { on: false, at: t[d] }
@@ -1121,9 +1357,11 @@ function pickByStamp(a, b, keysOf, tombOf, atOf) {
     const x = sideOf(a, sa, ta), y = sideOf(b, sb, tb);
     const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
     if (!win) continue;
-    if (win.on) kept.push(d); else tombs[d] = win.at;
+    if (win.on) { kept.push(d); if (win.at) stamps[d] = win.at; }
+    else tombs[d] = win.at;
   }
-  return { kept, tombs };
+  // stamps = 살아남은 키의 "켠 시각". 이걸 그대로 다시 저장해야 다음 병합도 같은 판정을 한다
+  return { kept, tombs, stamps };
 }
 
 /*
@@ -1137,16 +1375,44 @@ const newerEpoch = (a, b) => ({ ...(a.epoch > b.epoch ? a : b) });
 function mergeStates(a, b) {
   if (a.epoch !== b.epoch) return newerEpoch(a, b);
 
-  const att = pickByStamp(a, b, s => s.attendance, s => s.removed);
-  const his = pickByStamp(a, b, s => s.history.map(h => h.date), s => s.removedHistory);
+  const att = pickByStamp(a, b, s => s.attendance, s => s.removed,
+                          (s, d) => s.checked[d] || s.updatedAt || "");
 
+  // 이력은 항목이 객체라 date → 항목 색인을 만들어 두고 그 안의 at 을 쓴다
+  const histIndex = new Map();
+  const histOf = s => {
+    let m = histIndex.get(s);
+    if (!m) { m = new Map(s.history.map(h => [h.date, h])); histIndex.set(s, m); }
+    return m;
+  };
+  const his = pickByStamp(a, b, s => s.history.map(h => h.date), s => s.removedHistory,
+                          (s, d) => (histOf(s).get(d) || {}).at || s.updatedAt || "");
+
+  /*
+   * 같은 날짜의 내용은 at 이 늦은 쪽. 예전에는 "나중에 넣은 쪽이 이기는 Map" 이라
+   * 두 기기가 같은 날짜에 다른 벨트를 기록하면 원격이 무조건 이겼다 — 다른 필드는
+   * 전부 시각으로 판정하는데 여기만 인자 순서에 좌우되던 자리다.
+   */
   const histByDate = new Map();
-  [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
+  for (const h of [...a.history, ...b.history]) {
+    const cur = histByDate.get(h.date);
+    if (!cur || (h.at || "") > (cur.at || "")) histByDate.set(h.date, h);
+  }
+
+  /*
+   * 켬/끔은 합쳐질 수 있는 값이 아니라 **나중에 바꾼 쪽**이 이긴다.
+   * 여기서도 문서의 updatedAt 을 쓰면 안 된다 — 다른 기기에서 출석 한 번 체크한 것이
+   * 이쪽에서 방금 바꾼 설정을 되돌린다 (checked 와 같은 함정).
+   */
+  const track = (b.trackPromotionAt || "") > (a.trackPromotionAt || "") ? b : a;
 
   return {
     // 시작일은 "가장 이른 기록"이 진실이므로 최신 우선이 아니라 최소값을 쓴다
     startedAt: [a.startedAt, b.startedAt].filter(Boolean).sort()[0] || "",
+    trackPromotion: track.trackPromotion,
+    trackPromotionAt: track.trackPromotionAt,
     attendance: att.kept.sort(),
+    checked: att.stamps,          // 이긴 쪽의 켠 시각을 그대로 물려받는다
     removed: att.tombs,
     // 벨트·단계 시작일은 이력에서 파생되므로 이력만 합치면 된다
     history: his.kept.map(d => histByDate.get(d)).sort((x, y) => x.date.localeCompare(y.date)),
@@ -1161,9 +1427,23 @@ function mergeStates(a, b) {
  * 변한 게 없다고 보고 Gist 에 push 하지 않는다. 메모 쪽 짝은 notes.js 의 sameNotes.
  */
 function sameState(a, b) {
-  const norm = s => JSON.stringify([s.epoch, s.startedAt, s.attendance, s.removed,
+  const norm = s => JSON.stringify([s.epoch, s.startedAt, s.trackPromotion, s.trackPromotionAt,
+                                    s.attendance, s.checked, s.removed,
                                     s.history, s.removedHistory]);
   return norm(a) === norm(b);
+}
+
+/*
+ * 자정이 지나면 "오늘"이 바뀐다. render() 는 사용자 조작과 앱 복귀 때만 돌기 때문에,
+ * 켜 둔 채 자정을 넘기면 어제 칸이 오늘로 남아 **엉뚱한 날짜를 누르게 된다.**
+ * 데스크톱에서 탭을 띄워 두는 흐름에서 특히 잘 걸린다.
+ */
+let midnightTimer = null;
+function scheduleMidnight() {
+  clearTimeout(midnightTimer);
+  const n = new Date();
+  const next = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, 0, 0, 5);
+  midnightTimer = setTimeout(() => { render(); scheduleMidnight(); }, next - n);
 }
 
 let toastTimer = null;
@@ -1176,6 +1456,98 @@ function toast(msg) {
 }
 
 /* ============================================================
+   오버레이 스택 — 뜬 것은 전부 뒤로가기 한 번에 하나씩 닫힌다
+
+   예전에는 「전체 메모」 화면만 히스토리를 쌓았다. 그래서 본문에서 연 메모 팝업이나 공유
+   카드는 폰 뒤로가기로 닫히지 않고 **앱을 나가 버렸다** — 한 화면에서는 되고 다른 화면에서는
+   안 되는 것이 가장 나쁘다. 지금은 무엇이든 뜰 때 한 칸 쌓고, 내려올 때 그 칸을 되감는다.
+
+   닫기는 두 경로가 있다. 버튼·Escape 는 dismissOverlay 로 **즉시** 닫고 히스토리를 되감고,
+   하드웨어 뒤로가기는 popstate 가 깊이를 보고 닫는다. 깊이를 state 에 적어 두므로
+   여러 칸을 한 번에 되감아도(history.go(-2)) 정확히 그만큼만 닫힌다.
+   ============================================================ */
+
+let overlays = [];        // { name, close, box, mt } — 위로 쌓인 순서
+let overlayDepth = 0;     // 실제로 history 에 쌓은 칸 수
+
+/**
+ * @param close 실제로 감추는 함수. 히스토리를 건드리면 안 된다 (여기가 이미 맡고 있다)
+ * @param box   포커스를 가둘 요소. 화면 전환(전체 메모)처럼 모달이 아니면 생략한다
+ */
+function openOverlay(name, close, box) {
+  if (overlays.some(o => o.name === name)) return;
+  let mt = null;
+  try {
+    history.pushState({ mt: overlayDepth + 1 }, "");
+    mt = ++overlayDepth;
+  } catch (e) {
+    // 히스토리를 못 쌓는 환경이면 뒤로가기만 포기하고 그대로 동작한다
+    console.warn("히스토리를 쌓지 못했습니다", e);
+  }
+  overlays.push({ name, close, box: box || null, mt, focus: document.activeElement });
+  if (box) {
+    box.setAttribute("aria-modal", "true");
+    focusInto(box);
+  }
+}
+
+/** 버튼·Escape 로 닫을 때. 그 위에 뜬 것도 함께 내려온다 */
+function dismissOverlay(name) {
+  const i = overlays.findIndex(o => o.name === name);
+  if (i < 0) return;
+  const drop = overlays.splice(i);
+  let steps = 0;
+  for (let k = drop.length - 1; k >= 0; k--) {
+    closeOverlayRecord(drop[k]);
+    if (drop[k].mt !== null) steps++;
+  }
+  if (steps) { overlayDepth -= steps; history.go(-steps); }
+}
+
+function closeOverlayRecord(o) {
+  o.close();
+  if (o.box) o.box.removeAttribute("aria-modal");
+  // 열기 전에 있던 자리로 포커스를 돌려준다 — 안 그러면 body 로 떨어져 탭 순서를 잃는다
+  if (o.focus && o.focus.isConnected && o.focus.focus) o.focus.focus();
+}
+
+/** 하드웨어 뒤로가기. history.state 의 깊이까지만 내려온다 */
+function popOverlaysTo(target) {
+  overlayDepth = target;
+  while (overlays.length) {
+    const top = overlays[overlays.length - 1];
+    if (top.mt !== null && top.mt <= target) break;
+    closeOverlayRecord(overlays.pop());
+  }
+}
+
+const topOverlay = () => overlays[overlays.length - 1] || null;
+const overlayOpen = name => overlays.some(o => o.name === name);
+
+/** 모달 안에서 초점을 받을 수 있는 것들 (숨은 것 제외) */
+function focusables(box) {
+  return [...box.querySelectorAll("button, [href], input, textarea, select")]
+    .filter(el => !el.disabled && !el.hidden && el.offsetParent !== null);
+}
+
+function focusInto(box) {
+  const f = focusables(box);
+  if (f.length) f[0].focus();
+}
+
+/** 모달 밖으로 탭이 새어나가지 않게 앞뒤를 이어 붙인다 */
+function trapTab(e) {
+  const top = topOverlay();
+  if (!top || !top.box) return;
+  const f = focusables(top.box);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+  else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+  else if (!top.box.contains(document.activeElement)) { first.focus(); e.preventDefault(); }
+}
+
+/* ============================================================
    날짜 선택기 — 네이티브 date 입력은 시작 요일을 브라우저 로케일이 정해
    바꿀 수 없다. 출석 달력과 같은 일요일 시작으로 맞추려고 직접 만든다.
    ============================================================ */
@@ -1184,20 +1556,25 @@ let pickerTarget = null;      // 값을 채울 input
 let pickerCursor = today();   // 보고 있는 달
 
 function openPicker(input) {
+  if (overlayOpen("picker")) return;
   pickerTarget = input;
   const v = input.value;
-  pickerCursor = /^\d{4}-\d{2}-\d{2}$/.test(v) ? parseKey(v) : today();
+  pickerCursor = DATE_RE.test(v) ? parseKey(v) : today();
   $("pickerClear").hidden = input.dataset.clearable !== "1";
   $("picker").hidden = false;
   $("pickerBack").hidden = false;
   renderPicker();
+  openOverlay("picker", hidePicker, $("picker"));
 }
 
-function closePicker() {
+/** 실제로 감추기만 한다. 밖에서는 closePicker() 를 쓴다 */
+function hidePicker() {
   $("picker").hidden = true;
   $("pickerBack").hidden = true;
   pickerTarget = null;
 }
+
+const closePicker = () => dismissOverlay("picker");
 
 function commitPicker(value) {
   if (!pickerTarget) return;
@@ -1261,9 +1638,10 @@ let sharing = false;      // 연타·재시도로 공유 시트가 두 번 뜨�
 async function openShare(mode) {
   const box = $("shareBox"), back = $("shareBack");
   $("shareTitle").textContent = mode === "promotion" ? "🎉 승급을 기록했습니다" : "공유 카드";
-  $("sharePreview").removeAttribute("src");
+  revokePreview();
   $("shareNote").textContent = "카드를 만드는 중…";
   box.hidden = false; back.hidden = false;
+  openOverlay("share", hideShare, box);
 
   try {
     shareBlob = await drawShareCard(mode);
@@ -1276,14 +1654,21 @@ async function openShare(mode) {
   $("shareNote").textContent = "보내기 전에 어떤 내용이 담기는지 확인하세요.";
 }
 
-function closeShare() {
+/** 미리보기에 걸린 blob: URL 을 반드시 회수한다 — 안 하면 카드를 열 때마다 샌다 */
+function revokePreview() {
+  const img = $("sharePreview");
+  if (img.src && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  img.removeAttribute("src");
+}
+
+function hideShare() {
   $("shareBox").hidden = true;
   $("shareBack").hidden = true;
-  const img = $("sharePreview");
-  if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
-  img.removeAttribute("src");
+  revokePreview();
   shareBlob = null;
 }
+
+const closeShare = () => dismissOverlay("share");
 
 function shareText() {
   const { belt, stripe } = currentRank();

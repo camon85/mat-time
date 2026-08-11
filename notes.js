@@ -52,20 +52,27 @@ const fallbackTag = () => (noteDoc.tags[0] || DEFAULT_TAGS[0]).id;
 let noteDoc = {
   notes: {},          // "YYYY-MM-DD" → { text, tag, at }
   removedNotes: {},   // 삭제한 날짜 → 삭제 시각(ISO)
-  tags: [],           // { id, name } — 표시 순서 그대로. 1~10개
+  tags: [],           // { id, name, at } — 표시 순서 그대로. 1~10개
   removedTags: {},    // 삭제한 분류 id → 삭제 시각(ISO)
   updatedAt: "",
   epoch: 0
 };
 
-/** 메모 문서는 코어와 분리돼 있다 — 출석 한 번에 메모 전체를 다시 쓰지 않도록 */
+/**
+ * 메모 문서는 코어와 분리돼 있다 — 출석 한 번에 메모 전체를 다시 쓰지 않도록.
+ * 코어의 load() 와 같은 규약: "ok" | "empty" | "corrupt". 손상된 원본은 지우지 않고 옮긴다.
+ */
 function loadNotes() {
+  const raw = localStorage.getItem(NOTES_KEY);
+  if (!raw) { noteDoc = normalizeNotes({}); return "empty"; }
   try {
-    const raw = localStorage.getItem(NOTES_KEY);
-    noteDoc = normalizeNotes(raw ? JSON.parse(raw) : {});
+    noteDoc = normalizeNotes(JSON.parse(raw));
+    return "ok";
   } catch (e) {
     console.warn("메모를 읽지 못했습니다", e);
+    stashCorrupt(NOTES_KEY, raw);
     noteDoc = normalizeNotes({});
+    return "corrupt";
   }
 }
 
@@ -94,11 +101,13 @@ function normalizeNotes(d) {
       const name = (typeof t.name === "string" ? t.name : "").trim().slice(0, TAG_NAME_MAX);
       if (!okTagId(id) || !name || seen.has(id) || removedTags[id]) continue;
       seen.add(id);
-      tags.push({ id, name });
+      // at 은 "이 분류를 만든 시각" — 없으면 문서 시각으로 확정한다.
+      // 병합에서 삭제 툼스톤과 겨룰 값이 항목마다 있어야 지운 분류가 되살아나지 않는다
+      tags.push(withAt({ id, name }, (typeof t.at === "string" && t.at) ? t.at : updatedAt));
       if (tags.length >= MAX_TAGS) break;
     }
   }
-  if (!tags.length) tags = DEFAULT_TAGS.map(t => ({ ...t }));
+  if (!tags.length) tags = DEFAULT_TAGS.map(t => withAt({ ...t }, updatedAt));
   const tagSet = new Set(tags.map(t => t.id));
 
   const notes = {};
@@ -163,21 +172,32 @@ function mergeNotes(a, b) {
   /*
    * 분류도 같은 툼스톤 규칙. 합집합만 쓰면 한쪽에서 지운 분류가 되살아난다 (출석과 같은 함정).
    * 순서는 a 를 먼저 두고 b 에만 있는 것을 뒤에 붙여, 쓰던 기기의 배열이 흔들리지 않게 한다.
+   *
+   * "만든 시각"은 문서의 updatedAt 이 아니라 **항목의 at** 이다. 문서 시각을 쓰면 그 기기가
+   * 메모 하나만 고쳐도 지워진 분류가 전부 되살아난다 (출석에서 똑같이 밟은 함정).
    */
-  const tg = pickByStamp(a, b, s => s.tags.map(t => t.id), s => s.removedTags);
+  const tagIndex = new Map();
+  const tagOf = s => {
+    let m = tagIndex.get(s);
+    if (!m) { m = new Map(s.tags.map(t => [t.id, t])); tagIndex.set(s, m); }
+    return m;
+  };
+  const tg = pickByStamp(a, b, s => s.tags.map(t => t.id), s => s.removedTags,
+                         (s, id) => (tagOf(s).get(id) || {}).at || s.updatedAt || "");
   const keptTags = new Set(tg.kept);
   const nameOf = new Map();
   for (const s of [a, b]) {
     for (const t of s.tags) {
+      const at = t.at || s.updatedAt || "";
       const cur = nameOf.get(t.id);
-      if (!cur || (s.updatedAt || "") > cur.at) nameOf.set(t.id, { name: t.name, at: s.updatedAt || "" });
+      if (!cur || at > cur.at) nameOf.set(t.id, { name: t.name, at });
     }
   }
   let tags = [...new Set([...a.tags.map(t => t.id), ...b.tags.map(t => t.id)])]
     .filter(id => keptTags.has(id))
     .slice(0, MAX_TAGS)                     // 양쪽에서 더했다면 상한을 넘을 수 있다
-    .map(id => ({ id, name: nameOf.get(id).name }));
-  if (!tags.length) tags = DEFAULT_TAGS.map(t => ({ ...t }));
+    .map(id => withAt({ id, name: nameOf.get(id).name }, tg.stamps[id] || nameOf.get(id).at));
+  if (!tags.length) tags = DEFAULT_TAGS.map(t => withAt({ ...t }, a.updatedAt || b.updatedAt));
 
   // 분류가 사라진 메모는 첫 분류로. 여기서 안 맞추면 필터에 걸리지 않는 유령 메모가 남는다
   const tagSet = new Set(tags.map(t => t.id));
@@ -230,6 +250,7 @@ function openNote(dateKey, mode) {
   loadNoteForm(k);
   $("noteBack").hidden = false;
   $("noteBox").hidden = false;
+  openOverlay("note", hideNote, $("noteBox"));
   // 보기 모드에서 focus 하면 모바일에서 읽으려 열 때마다 키보드가 올라온다
   if (noteMode === "edit") $("noteText").focus();
 }
@@ -241,10 +262,12 @@ function editNote() {
   $("noteText").focus();
 }
 
-function closeNote() {
+function hideNote() {
   $("noteBox").hidden = true;
   $("noteBack").hidden = true;
 }
+
+const closeNote = () => dismissOverlay("note");
 
 /** 그 날짜의 기존 메모를 폼에 싣는다. 없으면 빈 폼 */
 function loadNoteForm(k) {
@@ -325,7 +348,7 @@ function addTag() {
   if (noteDoc.tags.some(t => t.id === name || t.name === name)) {
     toast("이미 있는 분류입니다"); return;
   }
-  noteDoc.tags.push({ id: name, name });
+  noteDoc.tags.push({ id: name, name, at: new Date().toISOString() });
   delete noteDoc.removedTags[name];        // 지웠던 이름을 되살리면 삭제 표시를 지운다
   noteForm.tag = name;                     // 방금 만든 걸 바로 쓰고 싶을 것이다
   saveNotes();
@@ -461,8 +484,9 @@ function renderMonthNotes() {
   link.hidden = !total;
 
   if (!total) {
-    // 메모가 아예 없을 때만 쓰는 법을 알린다 — 그러지 않으면 기능이 있는 줄 모른다
-    $("mnTitle").innerHTML = "메모 — 위 <b>연필</b>로 오늘 배운 걸 남겨보세요";
+    // 메모가 아예 없을 때만 쓰는 법을 알린다 — 그러지 않으면 기능이 있는 줄 모른다.
+    // 입구가 둘이므로 둘 다 알려야 한다 (달력을 길게 누르는 쪽은 발견되기 어렵다)
+    $("mnTitle").innerHTML = "메모 — 위 <b>연필</b>, 또는 날짜를 <b>길게</b> 눌러 남겨보세요";
     return;
   }
   // 올해가 아니면 연도를 붙인다 — 달을 계속 넘기다 보면 어느 해를 보고 있는지 놓친다
@@ -497,15 +521,13 @@ function openAllNotes() {
   window.scrollTo(0, 0);
   renderAllNotes();
   /*
-   * 폰 뒤로가기 제스처로 닫히도록 히스토리를 한 칸 쌓는다.
-   * URL 인자는 주지 않는다 — file:// 에서 주소를 바꾸면 브라우저에 따라 막힌다.
+   * 뒤로가기로 나갈 수 있도록 오버레이 스택에 얹는다 (히스토리 한 칸).
+   * 모달이 아니라 화면이므로 포커스를 가두지 않는다 — box 를 주지 않는 이유다.
    */
-  history.pushState({ notesPage: true }, "");
+  openOverlay("notes", hideAllNotes);
 }
 
-/** fromPop: popstate 로 불린 경우. 그때는 히스토리를 또 되감으면 안 된다 */
-function closeAllNotes(fromPop) {
-  if (!allNotesOpen()) return;
+function hideAllNotes() {
   $("notesPage").hidden = true;
   $("mainView").hidden = false;
   /*
@@ -514,9 +536,9 @@ function closeAllNotes(fromPop) {
    */
   void document.documentElement.scrollHeight;
   window.scrollTo(0, mainScroll);
-  if (!fromPop) history.back();
 }
 
+const closeAllNotes = () => dismissOverlay("notes");
 const allNotesOpen = () => !$("notesPage").hidden;
 
 /**

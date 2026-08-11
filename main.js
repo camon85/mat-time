@@ -33,7 +33,7 @@ $("monthNoteMore").onclick = () => { monthLimit += MONTH_PAGE; renderMonthNotes(
 
 $("btnAllNotes").onclick = openAllNotes;
 $("btnJump").onclick = toggleJumpPanel;
-$("btnNotesBack").onclick = () => closeAllNotes();
+$("btnNotesBack").onclick = closeAllNotes;
 // 폭이 바뀌면 점프바 칩이 다시 줄바꿈돼 높이가 달라진다 → 월 머리글이 붙을 위치도 갱신
 addEventListener("resize", () => { if (allNotesOpen()) syncStickyOffset(); });
 
@@ -44,14 +44,14 @@ addEventListener("resize", () => { if (allNotesOpen()) syncStickyOffset(); });
 if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
 /*
- * 폰 뒤로가기. 위에 뜬 것부터 닫되, 전체 메모 화면이 아직 살아 있으면 히스토리를 다시 쌓는다.
- * 그러지 않으면 팝업만 닫으려고 누른 뒤로가기가 화면까지 함께 닫는다.
+ * 폰 뒤로가기 — 뜬 것 하나만 닫는다.
+ *
+ * 어느 오버레이가 몇 칸째인지는 history.state 에 적혀 있다 (app.js 오버레이 스택 참조).
+ * 예전에는 「전체 메모」만 히스토리를 쌓아서, 본문에서 연 메모·공유 카드는 뒤로가기가
+ * **앱을 나가 버렸다.**
  */
-const repushNotes = () => { if (allNotesOpen()) history.pushState({ notesPage: true }, ""); };
 addEventListener("popstate", () => {
-  if (!$("picker").hidden)  { closePicker(); repushNotes(); return; }
-  if (!$("noteBox").hidden) { closeNote();   repushNotes(); return; }
-  closeAllNotes(true);
+  popOverlaysTo((history.state && history.state.mt) || 0);
 });
 
 /*
@@ -69,8 +69,21 @@ $("noteSearch").oninput = e => {
   }, SEARCH_DEBOUNCE);
 };
 
+/*
+ * 날짜 필드는 readonly 라 클릭으로 선택기를 연다. **키보드에서도 열려야 한다** —
+ * 예전엔 onclick 뿐이라 키보드·스위치 사용자는 시작일도 승급일도 넣을 수 없었다.
+ */
 $("setStarted").dataset.clearable = "1";        // 주짓수 시작일은 비울 수 있다
-[$("setStarted"), $("histDate"), $("noteDate")].forEach(inp => { inp.onclick = () => openPicker(inp); });
+[$("setStarted"), $("histDate"), $("noteDate")].forEach(inp => {
+  inp.onclick = () => openPicker(inp);
+  inp.setAttribute("aria-haspopup", "dialog");
+  inp.onkeydown = e => {
+    if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+      e.preventDefault();
+      openPicker(inp);
+    }
+  };
+});
 $("picker").querySelectorAll("[data-nav]").forEach(b => {
   b.onclick = () => {
     pickerCursor = addMonths(new Date(pickerCursor.getFullYear(), pickerCursor.getMonth(), 1),
@@ -82,17 +95,17 @@ $("pickerToday").onclick = () => commitPicker(key(today()));
 $("pickerClear").onclick = () => commitPicker("");
 $("pickerClose").onclick = closePicker;
 $("pickerBack").onclick = closePicker;
+
 /*
- * 위에 뜬 것부터 닫는다. 전체 메모가 화면이 된 뒤로 겹침은 두 겹뿐이다 —
- * 메모 팝업(58/59) → 날짜 선택기(60/61). 마지막 Escape 는 전체 메모 화면을 나간다.
+ * Escape 는 맨 위에 뜬 것 하나만 닫는다. 날짜 패널은 히스토리를 쌓지 않는 부속이라
+ * 오버레이 스택보다 먼저 본다.
  */
 document.addEventListener("keydown", e => {
+  if (e.key === "Tab") { trapTab(e); return; }
   if (e.key !== "Escape") return;
-  if (!$("picker").hidden) closePicker();
-  else if (!$("shareBox").hidden) closeShare();
-  else if (!$("noteBox").hidden) closeNote();
-  else if (jumpPanelOpen()) closeJumpPanel();     // 날짜 패널이 떠 있으면 그것부터
-  else if (allNotesOpen()) closeAllNotes();
+  if (jumpPanelOpen()) { closeJumpPanel(); return; }
+  const top = topOverlay();
+  if (top) dismissOverlay(top.name);
 });
 
 /*
@@ -105,18 +118,32 @@ document.addEventListener("click", e => {
   if (jumpPanelOpen() && !$("notesTop").contains(e.target)) closeJumpPanel();
 }, true);
 
-// 달을 바꾸면 그 달 목록을 처음부터 — 접힌 상태를 물고 가지 않는다
-function goMonth(delta) {
-  calCursor = new Date(calCursor.getFullYear(), calCursor.getMonth() + delta, 1);
-  monthLimit = MONTH_PAGE;
-  renderCalendar();
-}
 $("calPrev").onclick = () => goMonth(-1);
 $("calNext").onclick = () => goMonth(1);
 
+/*
+ * 달력 칸 길게 누르기 → 그날 메모. 칸은 매 렌더마다 새로 만들어지므로 격자에 위임한다.
+ * 로직은 app.js 에 있다 (click 억제 규칙이 달력 렌더와 짝을 이루기 때문).
+ */
+const cal = $("calGrid");
+cal.addEventListener("pointerdown", longPressStart);
+cal.addEventListener("pointermove", longPressMove);
+cal.addEventListener("pointerup", longPressCancel);
+cal.addEventListener("pointercancel", longPressCancel);
+cal.addEventListener("pointerleave", longPressCancel);
+cal.addEventListener("contextmenu", longPressMenu);
+// 스크롤이 시작되면 누르고 있던 것도 취소한다 (pointermove 가 안 오는 관성 스크롤 대비)
+addEventListener("scroll", longPressCancel, { passive: true });
+
+// 잔디 칸 → 그 달로 달력 이동. 371칸에 각각 붙이지 않고 위임한다
+$("heatGrid").addEventListener("click", e => {
+  const cell = e.target.closest("i[data-d]");
+  if (cell) goToMonth(cell.dataset.d);
+});
+
 $("setStarted").onchange = e => {
   const v = e.target.value;
-  if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { e.target.value = state.startedAt; return; }
+  if (v && !DATE_RE.test(v)) { e.target.value = state.startedAt; return; }
   if (v && parseKey(v) > today()) {
     alert("주짓수 시작일은 오늘 이후일 수 없습니다.");
     e.target.value = state.startedAt;
@@ -125,6 +152,8 @@ $("setStarted").onchange = e => {
   state.startedAt = v;                       // 빈 값이면 미설정으로 되돌린다
   save(); render();
 };
+
+$("setTrack").onchange = e => setTracking(e.target.checked);
 
 $("btnAddHist").onclick = () => toggleHistForm($("histForm").hidden);
 $("histDate").onchange = renderHistEffect;
@@ -155,6 +184,7 @@ $("btnDisconnect").onclick = disconnectSync;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   render();
+  scheduleMidnight();                        // 절전에서 깨면 타이머가 밀려 있을 수 있다
   if (syncOn() && (!sync.lastSync || new Date() - new Date(sync.lastSync) > 60000)) {
     syncNow(false);
   }
@@ -164,11 +194,35 @@ document.addEventListener("visibilitychange", () => {
    시작
    ============================================================ */
 
-loadSync();
-loadNotes();     // 메모 문서가 없으면 빈 문서 — 옛 사용자를 위한 마이그레이션은 필요 없다
-if (!load()) {
+const notesStatus = loadNotes();   // 메모 문서가 없으면 빈 문서 — 옛 사용자를 위한 마이그레이션은 필요 없다
+const coreStatus = load();
+if (coreStatus === "empty") {
   save();                                  // 첫 실행: 기본값 저장
   $("settings").open = true;               // 벨트/시작일부터 설정하도록 안내
 }
 render();
+scheduleMidnight();
 if (syncOn()) syncNow(false);              // 다른 기기에서 올린 기록 반영
+
+/*
+ * 읽지 못한 데이터가 있었으면 알린다. 원본은 지우지 않고 `<키>-corrupt` 로 옮겨 두었으므로
+ * 개발자 도구에서 꺼낼 수 있다 — 조용히 빈 화면을 보여주면 사용자는 유실로 받아들인다.
+ */
+if (coreStatus === "corrupt" || notesStatus === "corrupt") {
+  const what = coreStatus === "corrupt" && notesStatus === "corrupt" ? "출석 기록과 메모"
+             : coreStatus === "corrupt" ? "출석 기록" : "메모";
+  setTimeout(() => alert(
+    `저장된 ${what}를 읽지 못했습니다.\n` +
+    "덮어쓰지 않고 따로 보관해 두었습니다 (localStorage 의 «-corrupt» 키).\n" +
+    "깃허브에 연결해 두셨다면 곧 원격 기록으로 채워집니다."), 300);
+}
+
+/*
+ * 오프라인에서도 열리도록 앱 셸을 캐시한다. file:// 로 열어보는 개발 흐름에서는
+ * 등록 자체가 막히므로 프로토콜을 먼저 본다.
+ */
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW 등록 실패", e));
+  });
+}

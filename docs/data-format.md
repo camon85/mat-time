@@ -3,7 +3,9 @@
 Mat Time(주짓수 출석 트래커)이 저장하는 데이터의 형식과 의미를 정의한다.
 이 문서만 보고도 **다른 앱·스크립트에서 데이터를 읽고 쓰고 다시 계산**할 수 있도록 작성했다.
 
-- 대상 구현: [`../app.js`](../app.js)
+- 대상 구현: 코어 [`../app.js`](../app.js) · 메모 [`../notes.js`](../notes.js) ·
+  동기화 [`../sync.js`](../sync.js)
+- 이 문서의 규칙을 시험하는 테스트: [`../test/`](../test/) (`node --test "test/*.test.mjs"`)
 
 ---
 
@@ -58,7 +60,11 @@ gist 탐색 기준은 `bjj-attendance.json` 이므로 메모 도입 이전에 �
   const date = new Date(y, m - 1, d);        // 로컬 자정
   ```
 - **정렬**: 날짜 문자열은 사전순 정렬이 곧 시간순 정렬이다 (`localeCompare` / `<` 비교 가능).
-- **타임스탬프**: `updatedAt` 만 예외로 UTC ISO 8601 (`new Date().toISOString()`).
+- **타임스탬프**: 날짜가 아닌 시각 필드는 전부 UTC ISO 8601 (`new Date().toISOString()`).
+  `updatedAt` · 툼스톤 값 · 항목별 `at` · `checked` 값이 여기 해당한다.
+- **항목별 시각(`at` · `checked`)은 없을 수 있고, 없으면 "가장 오래됨"으로 읽는다.**
+  그래서 **빈 문자열로 저장하지 않는다** — 값이 없으면 키 자체를 넣지 않는다.
+  옛 문서를 읽을 때 문서의 `updatedAt` 으로 한 번 채워 넣지만, 그것마저 비어 있으면 비워 둔다.
 
 ---
 
@@ -67,13 +73,19 @@ gist 탐색 기준은 `bjj-attendance.json` 이므로 메모 도입 이전에 �
 ```json
 {
   "startedAt": "2020-03-01",
+  "trackPromotion": true,
+  "trackPromotionAt": "2026-08-11T01:22:03.410Z",
   "attendance": ["2026-08-01", "2026-08-04"],
+  "checked": {
+    "2026-08-01": "2026-08-01T11:30:02.144Z",
+    "2026-08-04": "2026-08-04T12:02:55.019Z"
+  },
   "removed": { "2026-07-15": "2026-08-05T02:10:11.000Z" },
   "removedHistory": { "2025-03-01": "2026-08-06T01:20:00.000Z" },
   "epoch": 0,
   "history": [
-    { "date": "2025-09-10", "belt": 0, "stripe": 1 },
-    { "date": "2026-06-01", "belt": 0, "stripe": 2 }
+    { "date": "2025-09-10", "belt": 0, "stripe": 1, "at": "2025-09-10T13:00:41.002Z" },
+    { "date": "2026-06-01", "belt": 0, "stripe": 2, "at": "2026-06-01T13:10:09.771Z" }
   ],
   "updatedAt": "2026-08-05T02:00:28.131Z"
 }
@@ -82,11 +94,14 @@ gist 탐색 기준은 `bjj-attendance.json` 이므로 메모 도입 이전에 �
 | 필드 | 타입 | 필수 | 의미 |
 |---|---|---|---|
 | `startedAt` | 날짜 \| `""` | ✔ | **주짓수를 처음 시작한 날**. `""` = 미설정. 표시 전용 |
+| `trackPromotion` | boolean | ✔ | 승급 진행도·로드맵·승급식 표시를 켤지. **기본 `false`** (아래) |
+| `trackPromotionAt` | ISO \| `""` | ✔ | 그 값을 마지막으로 바꾼 시각. 병합에서 늦은 쪽이 이긴다 |
 | `attendance` | 날짜[] | ✔ | 출석한 날. 중복 없음, 오름차순 |
+| `checked` | {날짜: ISO} | ✔ | **출석을 켠 날짜 → 켠 시각.** `attendance` 의 부분집합. 병합에서 취소 시각과 겨룬다 (§7) |
 | `removed` | {날짜: ISO} | ✔ | **출석을 취소한 날짜 → 취소 시각.** 병합 시 삭제를 전파하는 데 쓴다 (§7) |
 | `history` | 항목[] | ✔ | 승급 이력. `date` 중복 없음, `date` 오름차순. **현재 벨트의 원천** |
 | `removedHistory` | {날짜: ISO} | ✔ | **삭제한 승급일 → 삭제 시각.** `removed` 와 같은 역할을 이력에 대해 한다 |
-| `updatedAt` | ISO 문자열 \| `""` | ✔ | 마지막 사용자 변경 시각(UTC). 병합 시 승자 판정에 사용 (§7) |
+| `updatedAt` | ISO 문자열 \| `""` | ✔ | 마지막 사용자 변경 시각(UTC). 표시(`N분 전`)와 항목별 시각의 기본값에 쓴다 |
 | `epoch` | 0 이상 정수 | ✔ | **복원·초기화 세대.** 다르면 병합하지 않고 높은 쪽을 통째로 쓴다 (§7.3) |
 
 `history` 항목:
@@ -96,6 +111,25 @@ gist 탐색 기준은 `bjj-attendance.json` 이므로 메모 도입 이전에 �
 | `date` | 날짜 | 승급일 |
 | `belt` | `0..4` | 그날 **받은** 벨트 |
 | `stripe` | `0..4` | 그날 **받은** 그랄 수. `belt === 4`이면 `0` |
+| `at` | ISO \| 없음 | **이 항목을 기록한 시각.** 병합에서 `removedHistory` 와 겨룬다 (§7.1) |
+
+#### `checked` · `at` 은 왜 따로 있나 — 문서 시각으로는 부족하다
+
+`attendance` 에 날짜가 있다는 것만으로는 **언제 켰는지**를 알 수 없다. 예전에는 문서의
+`updatedAt` 을 그 대용으로 썼는데, 그러면 그 기기가 **무엇이든** 고칠 때마다 살아 있는 모든
+날짜의 주장 시각이 함께 밀려 상대의 취소 툼스톤을 통째로 이겼다.
+
+```
+폰:  8/1 출석 취소 (8/2 09:00) → Gist 에 올림
+PC:  아직 동기화 안 함. 8/5 에 열어서 8/5 만 새로 체크 → updatedAt = 8/5
+PC:  동기화 → 8/1 의 주장 시각도 8/5 가 되어 취소를 이김 → 8/1 이 되살아남 ✗
+```
+
+「폰에서 지우고 나중에 PC 를 연다」는 멀티기기의 기본 흐름이라 실제로 자주 걸렸다.
+지금은 날짜마다 자기 시각을 갖는다. 승급 이력(`at`)과 분류(`at`)도 같은 이유로 같은 모양이다.
+
+크기 대가는 코어 문서 기준 **약 3배**다 (§11). 그래도 메모 문서의 1/10 수준이라,
+문서를 나눠 둔 덕분에 출석 경로는 여전히 작다.
 
 ### 현재 벨트는 저장하지 않는다 — 이력에서 파생
 
@@ -116,6 +150,21 @@ function currentRank(doc) {
 > `startedAt` 과 현재 단계 시작일은 다르다.
 > `startedAt` 은 총 수련 기간 표시에만 쓰이고 **승급 계산에 관여하지 않는다**.
 
+### `trackPromotion` — 이력과 추적은 다른 사실이다
+
+`history` 는 "지금 내 벨트가 무엇인가"이고 어느 체육관에서나 참이다.
+`trackPromotion` 은 "다음 승급까지 얼마나 남았나를 보고 싶은가"이며, 그 계산은
+**한 체육관의 규정**(§5 의 표, 그리고 매월 마지막 금요일 승급식)에 기댄다.
+
+- **기본값은 `false`.** 값이 없으면 꺼짐이다
+- **`history` 가 비어 있는지로 추론하지 않는다.** 벨트를 맞추려고 이력을 넣은 사람이
+  남의 체육관 기준 D-day 까지 원한 것은 아니다. 두 필드는 독립이다
+- 끄더라도 **어떤 데이터도 지워지지 않는다.** 파생 계산(§6)을 화면에 안 그릴 뿐이라,
+  다시 켜면 그동안의 기록으로 즉시 계산된다
+
+읽는 쪽에서 `trackPromotion` 을 무시하고 §6 을 계산해도 값 자체는 정확하다 —
+그 값이 **그 사용자의 체육관에서 의미가 있는지**를 나타내는 필드일 뿐이다.
+
 ### 3.2 메모 문서 스키마
 
 ```json
@@ -129,12 +178,12 @@ function currentRank(doc) {
   },
   "removedNotes": { "2026-07-15": "2026-08-05T02:10:11.000Z" },
   "tags": [
-    { "id": "class",   "name": "수업" },
-    { "id": "seminar", "name": "세미나" },
-    { "id": "comp",    "name": "대회" },
-    { "id": "video",   "name": "영상" },
-    { "id": "etc",     "name": "기타" },
-    { "id": "노기",     "name": "노기" }
+    { "id": "class",   "name": "수업",   "at": "2026-01-02T00:00:00.000Z" },
+    { "id": "seminar", "name": "세미나", "at": "2026-01-02T00:00:00.000Z" },
+    { "id": "comp",    "name": "대회",   "at": "2026-01-02T00:00:00.000Z" },
+    { "id": "video",   "name": "영상",   "at": "2026-01-02T00:00:00.000Z" },
+    { "id": "etc",     "name": "기타",   "at": "2026-01-02T00:00:00.000Z" },
+    { "id": "노기",     "name": "노기",   "at": "2026-07-30T04:11:02.900Z" }
   ],
   "removedTags": { "드릴": "2026-08-06T09:00:00.000Z" },
   "updatedAt": "2026-08-07T11:02:31.884Z",
@@ -165,6 +214,7 @@ function currentRank(doc) {
 |---|---|---|
 | `id` | 문자열 | 1~10자. 메모가 참조하는 값 |
 | `name` | 문자열 | 1~10자. 화면에 보이는 이름 |
+| `at` | ISO \| 없음 | **이 분류를 만든 시각.** 병합에서 `removedTags` 와 겨룬다 (§7.5) |
 
 #### 분류는 상수가 아니라 데이터다
 
@@ -247,6 +297,8 @@ function stepIndex(belt, stripe) {
 ## 5. 승급 최소 기준
 
 체육관 규정. **수련 기간과 출석 일수를 모두** 충족해야 한다.
+아래 값과 §5.1 의 승급식 규칙은 **한 체육관의 것**이므로, 이 절과 §6 의 파생 계산은
+`trackPromotion` 이 켜진 사용자에게만 화면에 나타난다 (§3 참조).
 
 | 구간 | 수련 기간 | 출석 일수 |
 |---|---|---|
@@ -366,65 +418,99 @@ const totalPct  = (stepIndex(cur.belt, cur.stripe) + stagePct) / TOTAL_STEPS;
 | 필드 | 규칙 |
 |---|---|
 | `epoch` | **다르면 병합 자체를 하지 않는다.** 높은 쪽 문서를 통째로 채택 (§7.3) |
-| `attendance` / `removed` | 날짜마다 **켠 시각 vs 끈 시각**을 비교해 늦은 쪽 (아래) |
-| `history` / `removedHistory` | 위와 **같은 규칙**. 합집합으로 하면 이력 삭제가 되살아난다 |
-| `notes` / `removedNotes` | 날짜의 생사는 위와 같은 규칙, **본문은 항목의 `at`** 으로 판정 (§7.4) |
-| `tags` / `removedTags` | 같은 툼스톤 규칙. 순서는 a 우선, 이름 충돌은 `updatedAt` 늦은 쪽 (§7.5) |
+| `attendance` / `checked` / `removed` | 날짜마다 **켠 시각 vs 끈 시각**을 비교해 늦은 쪽 (아래) |
+| `history` / `removedHistory` | 위와 **같은 규칙**. "켠 시각"은 항목의 `at` |
+| `notes` / `removedNotes` | 날짜의 생사는 위와 같은 규칙, **본문도 항목의 `at`** 으로 판정 (§7.4) |
+| `tags` / `removedTags` | 같은 규칙. 순서는 a 우선, 이름 충돌은 `at` 늦은 쪽 (§7.5) |
 | `startedAt` | **더 이른 날짜** (빈 값은 무시). 시작일은 가장 이른 기록이 진실 |
+| `trackPromotion` | `trackPromotionAt` 이 늦은 쪽. 켬/끔은 합쳐질 수 없으므로 나중에 바꾼 쪽 |
 | `updatedAt` | 둘 중 더 최신값 (문서별로 따로) |
+
+`trackPromotion` 에 **자기 시각(`trackPromotionAt`)이 따로 있는 이유**는 `checked` 와 같다 —
+문서의 `updatedAt` 으로 가리면, 설정을 건드린 적 없는 기기에서 출석 한 번 체크한 것이
+방금 바꾼 설정을 되돌린다. `startedAt` 은 「더 이른 쪽」이라는 순서 무관 규칙이 있어
+시각이 필요 없지만, 불리언에는 그런 규칙이 없다.
 
 현재 벨트·단계 시작일은 이력에서 파생되므로 따로 병합할 필요가 없다.
 
-### 7.1 출석은 왜 합집합이 아닌가
+### 7.1 켠 시각 vs 끈 시각 — 하나의 규칙, 네 곳에 적용
 
 단순 합집합으로 하면 **취소가 아예 동작하지 않는다.** 방금 지운 날짜가 원격 문서에
 아직 남아 있어 다음 동기화에서 그대로 되살아나기 때문이다. 기기가 한 대여도 그렇다.
 
-그래서 취소한 날짜를 `removed` 에 **취소 시각과 함께** 남긴다. 병합할 때는 날짜마다
-양쪽 문서가 주장하는 (상태, 시각)을 만들어 늦은 쪽을 채택한다.
+그래서 지운 것을 툼스톤에 **시각과 함께** 남긴다. 병합할 때는 키마다 양쪽 문서가 주장하는
+(상태, 시각)을 만들어 늦은 쪽을 채택한다. 출석·승급 이력·메모·분류가 전부 같은 함수
+(`pickByStamp`)를 탄다. 다른 것은 "켠 시각"을 어디서 읽느냐뿐이다.
 
-- `removed[d]` 가 있으면 → `(off, removed[d])`
-- 없고 `attendance` 에 있으면 → `(on, 그 문서의 updatedAt)`
-- 둘 다 아니면 → 그 문서는 이 날짜에 대해 주장하지 않음
-
-켠 시각을 따로 저장하지 않고 문서의 `updatedAt` 을 대용으로 쓴다. 변경 직후 곧바로
-push 하므로 실용적으로 충분하다. 다시 체크하면 `removed` 키를 지우고 `attendance` 에
-넣으므로, 그 문서의 `updatedAt` 이 갱신되어 재체크가 이긴다.
+| 대상 | 살아 있음 | 켠 시각 | 지움 |
+|---|---|---|---|
+| 출석 | `attendance` 에 있음 | `checked[d]` | `removed[d]` |
+| 승급 이력 | `history` 에 있음 | 그 항목의 `at` | `removedHistory[d]` |
+| 메모 | `notes[d]` 있음 | `notes[d].at` | `removedNotes[d]` |
+| 분류 | `tags` 에 있음 | 그 항목의 `at` | `removedTags[id]` |
 
 ```js
-function merge(a, b) {
-  const histByDate = new Map();
-  [...a.history, ...b.history].forEach(h => histByDate.set(h.date, h));
-
-  const dates = new Set([...a.attendance, ...b.attendance,
-                         ...Object.keys(a.removed), ...Object.keys(b.removed)]);
-  const attendance = [], removed = {};
-  for (const d of dates) {
-    const sideOf = s => s.removed[d] ? { on: false, at: s.removed[d] }
-                      : s.attendance.includes(d) ? { on: true, at: s.updatedAt || "" }
-                      : null;
-    const x = sideOf(a), y = sideOf(b);
+/**
+ * 키마다 (살아있음/지워짐, 시각)을 만들어 늦은 쪽을 채택한다.
+ * livesIn·stampOf·tombOf 만 갈아 끼우면 출석·이력·메모·분류에 그대로 쓰인다.
+ */
+function pickByStamp(a, b, keysOf, tombOf, stampOf) {
+  const sa = new Set(keysOf(a)), sb = new Set(keysOf(b));   // 반드시 Set (§11 의 경고)
+  const ta = tombOf(a), tb = tombOf(b);
+  const kept = [], tombs = {}, stamps = {};
+  for (const k of new Set([...sa, ...sb, ...Object.keys(ta), ...Object.keys(tb)])) {
+    const sideOf = (s, set, t) =>
+      t[k]         ? { on: false, at: t[k] }
+      : set.has(k) ? { on: true,  at: stampOf(s, k) }
+      : null;                                     // 이 문서는 k 에 대해 주장하지 않음
+    const x = sideOf(a, sa, ta), y = sideOf(b, sb, tb);
     const win = !x ? y : !y ? x : (y.at > x.at ? y : x);
     if (!win) continue;
-    win.on ? attendance.push(d) : (removed[d] = win.at);
+    if (win.on) { kept.push(k); if (win.at) stamps[k] = win.at; }
+    else tombs[k] = win.at;
+  }
+  return { kept, tombs, stamps };
+}
+
+function merge(a, b) {
+  if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };   // §7.3
+
+  const att = pickByStamp(a, b, s => s.attendance, s => s.removed,
+                          (s, d) => s.checked[d] || s.updatedAt || "");
+  const his = pickByStamp(a, b, s => s.history.map(h => h.date), s => s.removedHistory,
+                          (s, d) => atOfHistory(s, d) || s.updatedAt || "");
+
+  // 같은 승급일에 내용이 다르면 at 이 늦은 쪽. 인자 순서에 좌우되면 안 된다
+  const byDate = new Map();
+  for (const h of [...a.history, ...b.history]) {
+    const cur = byDate.get(h.date);
+    if (!cur || (h.at || "") > (cur.at || "")) byDate.set(h.date, h);
   }
 
   return {
     startedAt: [a.startedAt, b.startedAt].filter(Boolean).sort()[0] || "",
-    attendance: attendance.sort(),
-    removed,
-    history: [...histByDate.values()].sort((x, y) => x.date.localeCompare(y.date)),
-    updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt
+    attendance: att.kept.sort(),
+    checked: att.stamps,                          // 이긴 쪽 시각을 그대로 물려받는다
+    removed: att.tombs,
+    history: his.kept.map(d => byDate.get(d)).sort((x, y) => x.date.localeCompare(y.date)),
+    removedHistory: his.tombs,
+    updatedAt: (b.updatedAt || "") > (a.updatedAt || "") ? b.updatedAt : a.updatedAt,
+    epoch: a.epoch
   };
 }
 ```
 
+**살아남은 키의 켠 시각은 이긴 쪽 값을 그대로 물려받는다.** 다시 계산하거나 지금 시각으로
+덮으면, 다음 병합이 같은 판정을 반복하지 못해 같은 툼스톤을 두 번 이기거나 두 번 진다.
+
 ### 7.2 남는 모호함
 
-`updatedAt` 은 그 문서의 **마지막** 변경 시각이지 해당 날짜를 켠 시각이 아니다.
-A가 어떤 날짜를 취소한 뒤 다른 항목을 고쳐 `updatedAt` 만 밀리는 식의 순서에서는
-판정이 뒤집힐 수 있다. 정확도를 더 올리려면 날짜마다 켠 시각을 저장하면 되지만
-(문서 크기 3~5배), 실사용에서 문제된 적은 없어 현재 방식을 쓴다.
+- **시계가 어긋난 기기.** 판정이 전부 시각 비교라, 한 기기의 시계가 크게 틀리면
+  그쪽 주장이 부당하게 이기거나 진다. 서버가 없으므로 보정할 방법이 없다.
+- **툼스톤은 지워지지 않는다.** 취소한 뒤 다시 체크하지 않은 날짜는 영구히 남는다.
+  「오래된 툼스톤 정리」는 안전하게 할 수 없다 — 그 툼스톤을 아직 못 본 기기가 있으면
+  지운 것이 그대로 되살아난다. 실측상 크기 영향이 없어 그냥 둔다.
+- **같은 세대에서 각자 오프라인 복원** (§7.3 참조).
 
 ### 7.3 세대(`epoch`) — 복원·초기화
 
@@ -435,9 +521,15 @@ A가 어떤 날짜를 취소한 뒤 다른 항목을 고쳐 `updatedAt` 만 밀�
 
 그래서 세대 번호를 둔다.
 
-- 복원·초기화 시 `epoch = max(현재 epoch, 파일의 epoch) + 1`
+- 복원·초기화 시 `epoch = max(현재 epoch, 파일의 epoch, **원격 epoch**) + 1`
 - 병합 시 `epoch` 가 다르면 **병합하지 않고 높은 쪽 문서를 통째로 채택**
 - 같으면 위의 항목별 규칙을 그대로 적용
+
+**원격을 반드시 함께 봐야 한다.** 로컬과 파일만 보고 세대를 정하면, 다른 기기가 이미
+초기화해 원격 세대가 더 높을 때 복원 결과가 낮은 세대로 올라간다. 그러면 그 기기가 나중에
+동기화할 때 옛 문서가 이겨 **복원이 통째로 되돌려진다** — 세대 장치를 둔 이유가 바로 그
+상황이므로, 덮어쓰기 직전에 원격 세대를 한 번 읽는다. (읽지 못하면 오프라인으로 보고
+로컬 기준으로 올린다.)
 
 ```js
 if (a.epoch !== b.epoch) return { ...(a.epoch > b.epoch ? a : b) };
@@ -493,11 +585,12 @@ function mergeNotes(a, b) {
 
 분류도 출석과 같은 함정을 갖는다. 합집합만 쓰면 **한쪽에서 지운 분류가 다른 기기에서 되살아난다.**
 그래서 `removedTags` 툼스톤을 두고 같은 `pickByStamp` 를 태운다.
-"켠 시각"은 항목별 값이 없으므로 문서의 `updatedAt` 을 쓴다 (§7.1 과 같은 근사).
+"켠 시각"은 항목의 `at` 이다 — 문서의 `updatedAt` 을 쓰면 그 기기가 메모 하나만 고쳐도
+지워진 분류가 전부 되살아난다 (§7.1 의 출석과 똑같은 함정을 여기서도 밟았다).
 
 살아남은 분류의 **순서**는 `a` 의 배열 순서를 먼저 두고 `b` 에만 있는 것을 뒤에 붙인다.
 쓰던 기기에서 칩 순서가 흔들리지 않게 하기 위해서다.
-**이름**이 다르면 `updatedAt` 이 늦은 쪽을 쓴다.
+**이름**이 다르면 `at` 이 늦은 쪽을 쓴다.
 
 양쪽에서 각각 추가해 합집합이 10개를 넘으면 앞에서부터 10개만 남긴다.
 결과가 0개면 초기값으로 되돌린다.
@@ -514,15 +607,18 @@ function mergeNotes(a, b) {
 
 1. `attendance` 는 중복이 없고 오름차순이다
 2. `attendance` 와 `removed` 의 키는 겹치지 않는다
-3. `history` 는 `date` 가 유일하고 오름차순이며, `removedHistory` 의 키와 겹치지 않는다
-4. `history[i].belt` 는 `0..4`, `stripe` 는 `0..4`, `belt === 4`면 `stripe === 0`
-5. 날짜 필드는 `YYYY-MM-DD` 이거나 (`startedAt` 한정) `""` 이다
-6. `epoch` 는 0 이상의 정수이며, 복원·초기화 때만 올라간다
-7. `notes` 의 키와 `removedNotes` 의 키는 겹치지 않는다
-8. `notes[d].text` 는 trim 된 1~500자, `at` 은 빈 문자열이 아니다
-9. **`notes[d].tag` 는 반드시 `tags` 안에 있다** — 없는 분류를 가리키는 메모는 존재하지 않는다
-10. `tags` 는 1~10개이고 `id` 가 유일하며, `removedTags` 의 키와 겹치지 않는다
-11. **`notes` 의 날짜는 `attendance` 와 아무 관계가 없다** — 출석 없는 날의 메모도, 메모 없는
+3. **`checked` 의 키는 `attendance` 의 부분집합이다** — 출석 없는 날의 켠 시각은 존재하지 않는다
+4. `history` 는 `date` 가 유일하고 오름차순이며, `removedHistory` 의 키와 겹치지 않는다
+5. `history[i].belt` 는 `0..4`, `stripe` 는 `0..4`, `belt === 4`면 `stripe === 0`
+6. 날짜 필드는 `YYYY-MM-DD` 이거나 (`startedAt` 한정) `""` 이다
+7. `epoch` 는 0 이상의 정수이며, 복원·초기화 때만 올라간다
+8. `notes` 의 키와 `removedNotes` 의 키는 겹치지 않는다
+9. `notes[d].text` 는 trim 된 1~500자, `at` 은 빈 문자열이 아니다
+10. **`notes[d].tag` 는 반드시 `tags` 안에 있다** — 없는 분류를 가리키는 메모는 존재하지 않는다
+11. `tags` 는 1~10개이고 `id` 가 유일하며, `removedTags` 의 키와 겹치지 않는다
+12. **시각 필드는 있으면 비어 있지 않다.** 값이 없으면 키·필드 자체가 없다
+    (`checked[d]` · `history[i].at` · `tags[i].at`)
+13. **`notes` 의 날짜는 `attendance` 와 아무 관계가 없다** — 출석 없는 날의 메모도, 메모 없는
     출석일도 정상이다
 
 **보장하지 않는 것** — 사용자가 자유롭게 기록할 수 있으므로 아래는 가정하면 안 된다.
@@ -551,9 +647,13 @@ function mergeNotes(a, b) {
 | `attendance` 의 형식 위반 문자열 | 개별 제거 후 중복 제거·정렬 |
 | `attendance` 와 `removed` 에 같은 날짜 | **취소가 이긴다** (`attendance` 에서 제거) |
 | `history` 와 `removedHistory` 에 같은 날짜 | **삭제가 이긴다** (`history` 에서 제거) |
-| `removed` · `removedHistory` 의 잘못된 키·빈 값 | 해당 항목 제거 |
+| `removed` · `removedHistory` · `checked` 의 잘못된 키·빈 값 | 해당 항목 제거 |
+| `checked` 에 `attendance` 없는 날짜 | 항목 제거 |
+| `checked[d]` · `history[i].at` 없음 | 문서의 `updatedAt` 으로 채움. 그것도 비면 필드 없이 둔다 |
 | `history` 의 `date` 형식 위반 항목 | 항목 제거. 남은 것은 날짜 기준 중복 제거·정렬 |
+| `history` 의 승급일 중복 | **뒤엣것이 남는다** |
 | `startedAt` 형식 위반 | `""` (미설정) |
+| `trackPromotion` 이 `true` 가 아님 (없음·문자열·1 …) | `false` (꺼짐) |
 | `attendance`/`history` 가 배열이 아님 | 빈 배열 |
 
 즉 **최소 문서는 `{}` 이며**, 이것만 넣어도 "오늘 시작한 화이트 0그랄"로 해석된다.
@@ -572,7 +672,8 @@ function mergeNotes(a, b) {
 | `notes` 와 `removedNotes` 에 같은 날짜 | **삭제가 이긴다** |
 | `notes` 가 객체가 아님 | 빈 객체 |
 | `tags` 항목의 `id`·`name` 형식 위반 | 항목 제거 |
-| `tags` 에 중복 id | 뒤엣것 제거 |
+| `tags[i].at` 없음 | 문서의 `updatedAt` 으로 채움. 그것도 비면 필드 없이 둔다 |
+| `tags` 에 중복 id | 뒤엣것 제거 (`history` 와 반대 방향이다) |
 | `tags` 와 `removedTags` 에 같은 id | **삭제가 이긴다** |
 | `tags` 가 10개 초과 | 앞에서 10개만 |
 | `tags` 가 배열이 아니거나 결과가 0개 | **초기값 5종** |
@@ -591,13 +692,16 @@ function mergeNotes(a, b) {
 | 아는 항목이 하나라도 있는지 | `Mat Time 백업 파일이 아닙니다` |
 | 있는 항목의 타입 | `항목 형식이 올바르지 않습니다 — attendance, history` |
 | `startedAt` 날짜 형식 | `startedAt "2020/03/01" 이 날짜 형식이 아닙니다` |
+| `trackPromotion` 타입 (boolean) | `항목 형식이 올바르지 않습니다 — trackPromotion` |
 | `attendance` 전 항목 날짜 형식 | `attendance 에 날짜가 아닌 값이 있습니다 — "nope"` |
 | `attendance` 중복 | `attendance 에 중복된 날짜가 있습니다` |
 | `history` 항목 구조·`date` | `history 의 date "..." 가 날짜 형식이 아닙니다` |
 | `history` 의 `belt`·`stripe` 범위 | `belt 값이 0~4 범위의 정수가 아닙니다` |
 | 블랙벨트 + 그랄 | `블랙벨트에는 그랄이 없습니다` |
 | `history` 승급일 중복 | `history 에 중복된 승급일이 있습니다` |
-| `removed`·`removedHistory` 키·값 | `removed["..."] 의 값이 비어 있습니다` |
+| `history[i].at` · `tags[i].at` 이 빈 문자열 | `history[...].at 이 비어 있습니다` |
+| `checked`·`removed`·`removedHistory` 키·값 | `removed["..."] 의 값이 비어 있습니다` |
+| `checked` ⊄ `attendance` | `checked["..."] 에 해당하는 출석이 attendance 에 없습니다` |
 | `tags` 개수 | `tags 가 10개를 넘습니다 (12개)` / `tags 가 비어 있습니다` |
 | `tags` 항목 구조·`id` | `tags 의 id "..." 가 1~10자 문자열이 아닙니다` |
 | `tags[i].name` 비어 있음·길이 | `tags["..."].name 이 10자를 넘습니다 (11자)` |
@@ -615,9 +719,17 @@ function mergeNotes(a, b) {
 | `notes` ∩ `removedNotes` | `... 이 notes 와 removedNotes 양쪽에 있습니다` |
 | `epoch` 타입 | `항목 형식이 올바르지 않습니다 — epoch` (0 이상 정수여야 함) |
 
-아는 항목은 `startedAt` · `attendance` · `removed` · `history` · `removedHistory` ·
-`notes` · `removedNotes` · `tags` · `removedTags` · `updatedAt` · `epoch` 이며,
-**하나라도 있고 나머지 검사를 모두 통과해야** 받아들인다.
+아는 항목은 `startedAt` · `trackPromotion` · `trackPromotionAt` · `attendance` · `checked` ·
+`removed` · `history` · `removedHistory` · `notes` · `removedNotes` · `tags` · `removedTags` ·
+`updatedAt` · `epoch` 이며, **하나라도 있고 나머지 검사를 모두 통과해야** 받아들인다.
+
+`trackPromotion` 은 **없어도 통과하고 꺼짐으로 읽힌다** (이 필드 이전의 백업).
+있으면 boolean 이어야 한다 — `"on"` 같은 값을 조용히 꺼짐으로 읽으면
+사용자에게는 설정이 사라진 것처럼 보인다.
+
+항목별 시각(`checked` · `history[i].at` · `tags[i].at`)은 **없어도 통과한다** —
+이 필드들이 생기기 전의 백업을 계속 복원할 수 있어야 하기 때문이다. 대신 있으면 형식을 본다.
+`notes[d].at` 만은 필수인데, 메모는 앱이 만들 때 항상 시각을 붙이기 때문이다.
 통과하면 §8 의 불변식이 이미 성립하므로 `normalize`·`normalizeNotes` 가 버리는 항목은 없다.
 그 뒤 요약(출석 N일 · 이력 N건 · 메모 N개)을 보여주고 확인을 받은 다음 덮어쓴다.
 
@@ -644,12 +756,22 @@ function mergeNotes(a, b) {
 
 실측값 (Chromium, 데스크톱). `render()` 는 전체 화면 재구성 1회 기준.
 
-| 시나리오 | 출석 일수 | JSON | 압축 시 | render | 캘린더 | 잔디 | 출석 토글 | 병합 |
+| 시나리오 | 출석 일수 | JSON | `checked` 포함 | render | 캘린더 | 잔디 | 출석 토글 | 병합 |
 |---|---|---|---|---|---|---|---|---|
-| 주 3회 × 10년 | 1,566 | 29.2 KB | 20.8 KB | 2.9 ms | 0.4 ms | 0.6 ms | 2.1 ms | 0.4 ms |
-| 주 5회 × 10년 | 2,610 | 47.5 KB | 34.1 KB | 4.9 ms | 2.1 ms | 0.7 ms | 5.0 ms | 0.7 ms |
-| 매일 × 10년 | 3,653 | 65.9 KB | 47.3 KB | 3.4 ms | 0.7 ms | 0.9 ms | 3.6 ms | 0.9 ms |
-| 매일 × 30년 | 10,958 | 194.3 KB | 140.1 KB | 8.2 ms | 1.8 ms | 1.7 ms | 9.1 ms | 2.5 ms |
+| 주 3회 × 10년 | 1,564 | 29.9 KB | **100.2 KB** | 2.9 ms | 0.4 ms | 0.6 ms | 2.1 ms | 0.4 ms |
+| 주 5회 × 10년 | 2,607 | 48.3 KB | **165.4 KB** | 4.9 ms | 2.1 ms | 0.7 ms | 5.0 ms | 0.7 ms |
+| 매일 × 10년 | 3,650 | 66.6 KB | **230.6 KB** | 3.4 ms | 0.7 ms | 0.9 ms | 3.6 ms | 0.9 ms |
+| 매일 × 30년 | 10,950 | 194.9 KB | **686.8 KB** | 8.2 ms | 1.8 ms | 1.7 ms | 9.1 ms | 2.5 ms |
+
+**날짜별 켠 시각(`checked`)이 코어 문서를 3.3~3.5배로 키운다.** ISO 문자열이 날짜 문자열보다
+길기 때문이다(`"2026-08-01": "2026-08-01T12:00:00.000Z"` = 45자 vs `"2026-08-01",` = 14자).
+그 값으로 사는 것이 「지운 출석이 되살아나지 않는 것」이고, 이 앱에서 가장 나쁜 버그가
+그것이었으므로 치를 만한 값이다 (§7.1).
+
+크기가 문제가 되는 지점은 **Gist 의 1 MB inline 임계** 하나인데, 최악(매일 × 30년)에도
+687 KB 라 닿지 않는다. 닿더라도 `readGistFile()` 이 `raw_url` 로 우회하므로 동작은 같다.
+
+시간 특성은 그대로다 — 병합·직렬화는 항목 수에 선형이고, 항목당 문자열이 길어졌을 뿐이다.
 
 `removed` · `removedHistory` 는 취소하고 다시 체크하지 않은 날짜만 담으므로 보통 비어 있다.
 크기에 실질적인 영향이 없어 위 표에는 반영하지 않았다.
@@ -687,7 +809,7 @@ function mergeNotes(a, b) {
 관련 한계선:
 
 - **Gist API 응답 잘림**: 파일 1 MB 초과 시 `truncated: true` 가 되고 본문 대신 `raw_url` 을 받는다.
-  코어는 30년치가 194 KB 이므로 도달하려면 **150년 이상** 필요하다.
+  코어는 30년치가 687 KB 이므로 도달하려면 **40년 이상** 필요하다.
   메모는 매번 500자를 채우면 10년에 2.4 MB 로 넘길 수 있는데, `readGistFile()` 이 두 파일 모두
   잘림을 처리하므로 동작에는 문제가 없다 — 읽을 때 요청이 한 번 더 갈 뿐이다.
   **코어가 이 경로를 타지 않게 만든 것이 분리의 효과 중 하나다**
@@ -736,6 +858,7 @@ for d, note in sorted(doc.get("notes", {}).items(), reverse=True):
 const doc = {
   startedAt: "2020-03-01",
   attendance: ["2026-06-02", "2026-06-04"],
+  // checked · at 은 생략해도 된다. 앱이 읽을 때 updatedAt 으로 채운다
   removed: {},
   history: [{ date: "2026-06-01", belt: 1, stripe: 2 }],   // ← 현재 = 블루 2그랄
   removedHistory: {},

@@ -65,14 +65,32 @@ async function readGistFile(gist, name, parse) {
 const coreJson = () => JSON.stringify(state, null, 2);
 const notesJson = () => JSON.stringify(noteDoc, null, 2);
 
+/*
+ * 계정의 gist 를 훑어 우리 것을 찾는다.
+ *
+ * 한 페이지(100개)만 보면 gist 를 많이 가진 계정에서 기존 기록을 놓치고 **새 gist 를 만든다** —
+ * 사용자 눈에는 "다른 기기 기록이 안 따라온다 = 유실" 로 보인다. 그래서 찾을 때까지 넘긴다.
+ * 상한을 두는 이유는 못 찾는 계정에서 무한히 요청하지 않기 위해서다.
+ */
+const GIST_PAGES_MAX = 10;      // 최대 1,000개까지 훑는다
+
+async function findGist() {
+  for (let page = 1; page <= GIST_PAGES_MAX; page++) {
+    const list = await gh(`/gists?per_page=100&page=${page}`);
+    // 탐색 기준은 코어 파일 — 메모 파일이 없는 기존 gist 도 그대로 찾아낸다
+    const hit = list.find(g => g.files && g.files[GIST_FILE]);
+    if (hit) return hit;
+    if (list.length < 100) return null;        // 마지막 페이지
+  }
+  return null;
+}
+
 /** 토큰으로 기존 Gist 를 찾고, 없으면 새로 만든다 */
 async function connectSync(token) {
   sync.token = token.trim();
   setSyncStatus("busy", "연결 중…");
   try {
-    const list = await gh("/gists?per_page=100");
-    // 탐색 기준은 코어 파일 — 메모 파일이 없는 기존 gist 도 그대로 찾아낸다
-    const found = list.find(g => g.files && g.files[GIST_FILE]);
+    const found = await findGist();
     if (found) {
       sync.gistId = found.id;
     } else {
@@ -96,9 +114,22 @@ async function connectSync(token) {
   }
 }
 
+/*
+ * 동기화는 한 번에 하나만 돈다.
+ *
+ * 트리거가 넷이라(디바운스 · 앱 복귀 · 수동 버튼 · 부팅) 겹치기 쉬운데, 겹치면 두 실행이
+ * 같은 원격을 읽고 각자 PATCH 해서 나중에 도착한 쪽이 먼저 것을 지운다. 로컬은 온전하므로
+ * 다음 동기화에서 회복되지만, 그때까지 Gist 가 뒤처지고 요청만 두 배로 나간다.
+ * 돌고 있는 동안 들어온 요청은 버리지 않고 끝난 뒤 한 번 더 돌린다 (마지막 변경이 유실되지 않게).
+ */
+let syncBusy = 0;          // 불리언이 아니라 카운터 — 덮어쓰기와 겹쳐도 중간에 열리지 않는다
+let syncAgain = false;
+
 /** 원격을 읽어 병합하고, 달라진 게 있으면 올린다 */
 async function syncNow(manual = false) {
   if (!syncOn()) return;
+  if (syncBusy) { syncAgain = true; return; }
+  syncBusy++;
   setSyncStatus("busy", "동기화 중…");
   try {
     const gist = await gh("/gists/" + sync.gistId);
@@ -134,6 +165,9 @@ async function syncNow(manual = false) {
     setSyncStatus("err", e.message);
     render();
     if (manual) toast(e.message);
+  } finally {
+    syncBusy--;
+    if (syncAgain) { syncAgain = false; scheduleSync(); }
   }
 }
 
@@ -146,6 +180,8 @@ function scheduleSync() {
 /**
  * 초기화·복원처럼 "덮어쓰기"가 의도된 경우. 병합하면 지운 기록이 원격에서
  * 되돌아오므로 원격을 현재 상태로 밀어버린다.
+ *
+ * 로컬 쓰기를 먼저 끝낸 뒤에 네트워크를 탄다 — 오프라인이거나 느려도 복원 결과는 남아야 한다.
  */
 async function saveOverwrite() {
   const now = new Date().toISOString();
@@ -154,9 +190,32 @@ async function saveOverwrite() {
   writeLocal();
   writeNotesLocal();
   if (!syncOn()) return;
+
   clearTimeout(syncTimer);
+  syncBusy++; syncAgain = false;          // 돌고 있던 병합이 이 덮어쓰기를 뒤엎지 못하게
   setSyncStatus("busy", "동기화 중…");
   try {
+    /*
+     * 세대를 원격 위로 올린다.
+     *
+     * 호출부는 "로컬과 파일 중 큰 쪽 + 1" 까지만 안다. 그런데 다른 기기가 이미 초기화해
+     * 원격 세대가 더 높으면, 복원 결과가 낮은 세대로 올라가고 → 그 기기가 나중에 동기화할 때
+     * newerEpoch 이 옛 문서를 골라 **복원이 통째로 되돌려진다.** 세대 장치를 둔 이유가
+     * 바로 이 상황이므로 여기서 원격을 한 번 확인한다.
+     */
+    try {
+      const gist = await gh("/gists/" + sync.gistId);
+      const rc = await readGistFile(gist, GIST_FILE, normalize);
+      const rn = await readGistFile(gist, NOTES_FILE, normalizeNotes);
+      let bumped = false;
+      if (rc && rc.epoch >= state.epoch) { state.epoch = rc.epoch + 1; bumped = true; }
+      if (rn && rn.epoch >= noteDoc.epoch) { noteDoc.epoch = rn.epoch + 1; bumped = true; }
+      if (bumped) { writeLocal(); writeNotesLocal(); }
+    } catch (e) {
+      // 읽지 못하면 호출부가 정한 세대로 그냥 올린다 (오프라인·권한 문제 등)
+      console.warn("원격 세대를 확인하지 못했습니다", e);
+    }
+
     await gh("/gists/" + sync.gistId, {
       method: "PATCH",
       body: JSON.stringify({
@@ -171,6 +230,8 @@ async function saveOverwrite() {
   } catch (e) {
     setSyncStatus("err", e.message);
     toast(e.message);
+  } finally {
+    syncBusy--;
   }
   render();
 }

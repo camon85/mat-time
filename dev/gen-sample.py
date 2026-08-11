@@ -49,7 +49,10 @@ STEPS = [
     (61, 1, 0), (53, 1, 1), (44, 1, 2), (36, 1, 3), (27, 1, 4),   # 블루
     (17, 2, 0), (8, 2, 1), (5, 2, 2),                    # 퍼플 — 현재 퍼플 2그랄
 ]
-history = [{"date": k(months_before(m)), "belt": b, "stripe": s} for m, b, s in STEPS]
+# at 은 "그 항목을 기록한 시각" — 병합에서 삭제 툼스톤과 겨루는 값이다 (data-format.md §7).
+# 없어도 앱이 문서 시각으로 채우지만, 샘플은 현재 형식을 그대로 보여주는 편이 낫다.
+history = [{"date": k(months_before(m)), "belt": b, "stripe": s,
+            "at": k(months_before(m)) + "T12:00:00.000Z"} for m, b, s in STEPS]
 history.sort(key=lambda h: h["date"])
 
 # 주짓수 시작일 — 첫 그랄 4개월 전쯤
@@ -76,14 +79,15 @@ while d <= TODAY:
     d += timedelta(days=1)
 
 # ── 분류 ──────────────────────────────────────────────────
+TAG_AT = k(months_before(6)) + "T09:00:00.000Z"
 tags = [
-    {"id": "class",   "name": "수업"},
-    {"id": "seminar", "name": "세미나"},
-    {"id": "comp",    "name": "대회"},
-    {"id": "video",   "name": "영상"},
-    {"id": "etc",     "name": "기타"},
-    {"id": "노기",     "name": "노기"},        # 사용자가 추가한 분류 (이름이 곧 id)
-    {"id": "오픈매트",  "name": "오픈매트"},
+    {"id": "class",   "name": "수업",     "at": TAG_AT},
+    {"id": "seminar", "name": "세미나",   "at": TAG_AT},
+    {"id": "comp",    "name": "대회",     "at": TAG_AT},
+    {"id": "video",   "name": "영상",     "at": TAG_AT},
+    {"id": "etc",     "name": "기타",     "at": TAG_AT},
+    {"id": "노기",     "name": "노기",     "at": TAG_AT},   # 사용자가 추가한 분류 (이름이 곧 id)
+    {"id": "오픈매트",  "name": "오픈매트", "at": TAG_AT},
 ]
 
 # ── 메모 ──────────────────────────────────────────────────
@@ -183,7 +187,13 @@ while len(notes) < target and cycle:
 
 doc = {
     "startedAt": k(started),
+    # 샘플은 승급 추적을 켠 상태다 — README 스크린샷에 진행도·로드맵이 나와야 한다.
+    # 기본값은 꺼짐이므로, 이 줄이 없으면 복원해도 두 카드가 보이지 않는다
+    "trackPromotion": True,
+    "trackPromotionAt": f"{k(TODAY)}T09:00:00.000Z",
     "attendance": sorted(attendance),
+    # 켠 시각 — 날짜마다 하나씩. 이게 있어야 다른 기기의 취소가 되살아나지 않는다
+    "checked": {d: d + "T12:00:00.000Z" for d in sorted(attendance)},
     "removed": {},
     "history": history,
     "removedHistory": {},
