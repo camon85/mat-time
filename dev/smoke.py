@@ -58,6 +58,11 @@ def run(url, label):
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
 
+        # 예기치 않은 시스템 대화상자를 잡아 둔다. 출석 취소는 토스트 방식이라 하나도 안 떠야 한다
+        # (핸들러가 없으면 Playwright 가 조용히 자동 거부해 검사가 헛돈다)
+        dialogs = []
+        page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+
         fresh(page, url)
         check("콘솔 오류 없이 뜬다", not errors, "; ".join(errors[:2]))
 
@@ -65,9 +70,30 @@ def run(url, label):
         page.click(TODAY_CELL)
         on = page.eval_on_selector(TODAY_CELL, "el => el.classList.contains('on')")
         check("오늘 칸을 탭하면 출석이 켜진다", on)
+        check("켤 때는 되돌리기 버튼이 없다", page.is_hidden("#toastAction"))
+
+        # --- 취소는 토스트로 되돌릴 수 있다. 잘못 스쳐서 지워지면 나중에 알아채기 어렵다
+        t0 = page.evaluate("() => new Date().toISOString()")
         page.click(TODAY_CELL)
-        off = page.eval_on_selector(TODAY_CELL, "el => !el.classList.contains('on')")
-        check("다시 탭하면 취소된다", off)
+        check("탭 한 번으로 취소된다 (확인창 없음)",
+              page.eval_on_selector(TODAY_CELL, "el => !el.classList.contains('on')"))
+        check("시스템 대화상자가 뜨지 않는다", not dialogs, "; ".join(dialogs[:2]))
+        check("되돌리기 버튼이 함께 뜬다",
+              page.is_visible("#toastAction") and page.inner_text("#toastAction") == "되돌리기")
+
+        page.click("#toastAction")
+        page.wait_for_timeout(150)
+        check("되돌리면 출석이 살아난다",
+              page.eval_on_selector(TODAY_CELL, "el => el.classList.contains('on')"))
+        check("되돌리기 버튼은 한 번 쓰고 사라진다", page.is_hidden("#toastAction"))
+        # 되돌린 뒤의 켠 시각은 **취소보다 늦어야** 한다. 원래 시각을 복원하면
+        # 이미 올라간 취소 툼스톤이 다음 병합에서 이겨 되살린 출석이 도로 사라진다
+        check("되돌리기가 켠 시각을 새로 찍는다",
+              page.evaluate("t0 => state.checked[key(today())] > t0", t0),
+              page.evaluate("() => state.checked[key(today())]"))
+        page.click(TODAY_CELL)
+        check("다시 탭하면 취소된다",
+              page.eval_on_selector(TODAY_CELL, "el => !el.classList.contains('on')"))
 
         # --- 롱프레스 = 메모. 출석은 절대 건드리면 안 된다
         box = page.locator(TODAY_CELL).bounding_box()
@@ -229,10 +255,18 @@ def run(url, label):
         })""")
         check("항목별 시각이 없는 옛 백업도 받아들인다", legacy is None, str(legacy))
 
-        # --- 연타: 토글이 짝이 맞고 유령 도장이 남지 않아야 한다
         # 앞의 잔디 점프로 달력이 다른 달에 가 있다. 오늘 칸을 쓰려면 이번 달로 돌아온다
         page.evaluate("goToMonth(key(today()))")
         page.wait_for_timeout(100)
+
+        # --- 출석을 취소해도 그날 메모는 남는다 (둘은 독립이다)
+        if not page.eval_on_selector(TODAY_CELL, "el => el.classList.contains('on')"):
+            page.click(TODAY_CELL)
+        page.click(TODAY_CELL)
+        check("출석을 취소해도 그날 메모는 남는다",
+              page.evaluate("() => !!noteDoc.notes[key(today())]"))
+
+        # --- 연타: 토글이 짝이 맞고 유령 도장이 남지 않아야 한다
         for _ in range(6):
             page.click(TODAY_CELL)
         st = page.evaluate("() => ({on: state.attendance.length, chk: Object.keys(state.checked).length})")
@@ -245,12 +279,101 @@ def run(url, label):
           let threw = false;
           try { toggleDay(key(addDays(today(), -3))); } catch (e) { threw = true; }
           localStorage.setItem = real;
-          return { threw, toast: $('toast').textContent };
+          return { threw, toast: $('toastMsg').textContent };
         }""")
         check("저장 실패가 앱을 죽이지 않는다", not quota["threw"], str(quota))
-        check("저장 실패를 사용자에게 알린다", "저장" in quota["toast"], quota["toast"])
+        # 실패 안내가 마지막에 남아야 한다 — 「출석 완료」로 덮이면 안 저장된 걸 성공으로 알린다
+        check("저장 실패를 사용자에게 알린다", "저장 실패" in quota["toast"], quota["toast"])
+        check("저장 실패 시 완료 안내를 덮어씌우지 않는다", "완료" not in quota["toast"], quota["toast"])
+
+        note_quota = page.evaluate("""() => {
+          const real = localStorage.setItem.bind(localStorage);
+          localStorage.setItem = () => { const e = new Error('quota'); e.name = 'QuotaExceededError'; throw e; };
+          openNote(key(addDays(today(), -5)), 'edit');
+          $('noteText').value = '저장 안 될 메모';
+          saveNote();
+          localStorage.setItem = real;
+          return $('toastMsg').textContent;
+        }""")
+        check("메모 저장 실패도 성공 안내에 덮이지 않는다",
+              "저장 실패" in note_quota, note_quota)
 
         check("전 과정에서 콘솔 오류가 없다", not errors, "; ".join(errors[:3]))
+        browser.close()
+
+
+def check_safe_area(url):
+    """홈 화면에서 실행했을 때 상단이 상태바·노치에 가리지 않는지.
+
+    iOS 는 black-translucent 라 내용이 상태바 아래까지 그려진다. 크롬의 안전영역
+    에뮬레이션으로 아이폰 값을 넣어 같은 조건을 만든다.
+    """
+    INSET = 59
+    print("\n=== 안전영역 (홈 화면 실행) ===")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 393, "height": 852})
+        cdp = page.context.new_cdp_session(page)
+        try:
+            cdp.send("Emulation.setSafeAreaInsetsOverride",
+                     {"insets": {"top": INSET, "bottom": 34}})
+        except Exception as e:
+            print(f"  (건너뜀 — 이 크로미움은 안전영역 에뮬레이션이 없다: {str(e)[:60]})")
+            browser.close()
+            return
+        fresh(page, url)
+        page.evaluate("""() => {
+          for (const d of ['2024-03-05', '2025-06-11', '2026-01-20', '2026-08-02'])
+            noteDoc.notes[d] = { text: d + ' 메모', tag: 'class', at: new Date().toISOString() };
+          saveNotes(); render();
+        }""")
+
+        r = page.evaluate("""() => ({
+          belt: Math.round(document.querySelector('header .belt-mount').getBoundingClientRect().top),
+          strip: Math.round(parseFloat(getComputedStyle(document.body, '::before').height))
+        })""")
+        check("맨 위 벨트가 상태바에 가리지 않는다", r["belt"] >= INSET, str(r))
+        check("상태바 자리에 앱 배경이 깔린다", r["strip"] == INSET, str(r))
+
+        page.click("#btnAllNotes")
+        page.wait_for_timeout(400)
+        page.evaluate("window.scrollTo(0, 1200)")
+        page.wait_for_timeout(200)
+        r = page.evaluate("""() => {
+          const stick = parseFloat(getComputedStyle(document.documentElement)
+                                   .getPropertyValue('--notes-stick'));
+          // 지금 고정 선에 걸쳐 있는 그룹 — 그 머리글이 붙어 있어야 할 자리다.
+          // (이미 지나간 머리글은 위로 밀려나므로 세면 안 된다)
+          const g = [...document.querySelectorAll('.note-group')].find(el => {
+            const b = el.getBoundingClientRect();
+            return b.top <= stick && b.bottom > stick;
+          });
+          const head = g && g.querySelector('.note-mhead').getBoundingClientRect();
+          /*
+           * 머리글은 고정 선에 붙되, 자기 그룹이 끝나면 그 끝에 밀려 위로 올라간다
+           * (그게 「지나간 머리글이 다음 것에 밀려나는」 동작이다). 기대값은 둘 중 작은 쪽.
+           */
+          return {
+            bar: Math.round(notesTop.getBoundingClientRect().top),
+            stick: Math.round(stick),
+            barBottom: Math.round(notesTop.getBoundingClientRect().bottom),
+            head: head ? Math.round(head.top) : null,
+            want: g ? Math.round(Math.min(stick, g.getBoundingClientRect().bottom - head.height)) : null
+          };
+        }""")
+        check("스크롤해도 고정 바가 상태바 아래에 붙는다", r["bar"] == INSET, str(r))
+        check("--notes-stick 이 안전영역을 포함한다", r["stick"] == r["barBottom"], str(r))
+        check("월 머리글이 고정 바 바로 아래에 붙는다",
+              r["head"] is not None and abs(r["head"] - r["want"]) <= 1, str(r))
+
+        jumped = page.evaluate("""() => {
+          jumpTo('2024-03');
+          const g = document.querySelector('.note-group[data-ym="2024-03"]');
+          const stick = parseFloat(getComputedStyle(document.documentElement)
+                                   .getPropertyValue('--notes-stick'));
+          return Math.abs(g.getBoundingClientRect().top - stick) <= 1;
+        }""")
+        check("연·월 점프가 안전영역만큼 어긋나지 않는다", jumped)
         browser.close()
 
 
@@ -318,6 +441,7 @@ def main():
     try:
         run(url, "http (서비스 워커 등록됨)")
         check_offline(url)
+        check_safe_area(url)
         check_corrupt(url)
         if args.file:
             run((ROOT / "index.html").as_uri(), "file://")

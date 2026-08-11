@@ -438,8 +438,15 @@
   </div>
 </div>
 
-<!-- 안내가 화면에만 뜨면 스크린리더 사용자에게는 아무 일도 안 일어난 것과 같다 -->
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<!--
+  안내 한 줄. 되돌릴 수 있는 동작이면 오른쪽에 버튼이 함께 뜬다.
+  live 영역은 **메시지에만** 건다 — 버튼까지 묶으면 뜰 때마다 버튼 이름이 함께 읽힌다.
+  (안내가 화면에만 뜨면 스크린리더 사용자에게는 아무 일도 안 일어난 것과 같다)
+-->
+<div class="toast" id="toast">
+  <span id="toastMsg" role="status" aria-live="polite"></span>
+  <button type="button" id="toastAction" hidden></button>
+</div>
 
 <!--
   일반 스크립트라 전역을 공유한다. 순서가 중요한 건 main.js 하나뿐 —

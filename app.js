@@ -276,19 +276,25 @@ function normalize(d) {
 
 function clamp(n, lo, hi) { return Math.min(hi, Math.max(lo, n)); }
 
-/** 사용자 변경에 의한 저장. updatedAt 을 갱신하고 동기화를 예약한다. */
+/**
+ * 사용자 변경에 의한 저장. updatedAt 을 갱신하고 동기화를 예약한다.
+ * **성공 여부를 돌려준다** — 실패했으면 부르는 쪽이 「완료」 안내를 띄우면 안 된다.
+ */
 function save() {
   state.updatedAt = new Date().toISOString();
-  writeLocal();
+  const ok = writeLocal();
   scheduleSync();
+  return ok;
 }
 
 /** 병합 결과 반영 등 updatedAt 을 건드리면 안 되는 저장 */
 function writeLocal() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    return true;
   } catch (e) {
     toast("저장 실패 — 저장 공간을 확인하세요");
+    return false;
   }
 }
 
@@ -301,28 +307,61 @@ function hasAttended(k) {
 }
 
 /**
+ * 출석을 켠다. 되돌리기도 이 경로를 그대로 탄다.
+ *
+ * **켠 시각은 언제나 지금이다.** 되돌릴 때 원래 시각을 복원하면 안 된다 — 취소가 이미
+ * Gist 에 올라갔다면(디바운스 1.5초) 원격 툼스톤이 그 시각보다 늦어, 다음 병합에서
+ * 되살린 출석이 도로 사라진다.
+ */
+function checkDay(k) {
+  if (!state.attendance.includes(k)) {
+    state.attendance.push(k);
+    state.attendance.sort();
+  }
+  delete state.removed[k];
+  state.checked[k] = new Date().toISOString();
+  const ok = save();
+  render();
+  return ok;
+}
+
+function uncheckDay(k) {
+  const i = state.attendance.indexOf(k);
+  if (i < 0) return false;
+  state.attendance.splice(i, 1);
+  delete state.checked[k];
+  // 취소는 시각과 함께 남긴다 — 그러지 않으면 동기화 시 원격의 합집합 병합으로 되살아난다
+  state.removed[k] = new Date().toISOString();
+  const ok = save();
+  render();
+  return ok;
+}
+
+/**
  * 출석 토글. 미래 날짜는 무시.
- * 취소는 removed 에 시각과 함께 남긴다 — 그러지 않으면 동기화 시 원격의
- * 합집합 병합으로 방금 지운 날짜가 되살아난다.
+ *
+ * **취소에는 되돌리기를 붙인다.** 두 방향의 성격이 다르기 때문이다. 체크는 잘못해도
+ * 바로 보이지만(없던 초록이 생긴다), 취소는 **잘못 눌러도 티가 안 난다** — 초록이 회색으로
+ * 바뀔 뿐이라 스치듯 지운 것을 나중에 알아채기 어렵고 그때는 어느 날이었는지도 모른다.
+ *
+ * 확인창(confirm) 대신 토스트를 쓴다. 이 앱에서 출석 토글의 피드백은 원래 토스트인데,
+ * 거기에 확인창을 얹으면 같은 동작이 두 가지 방식으로 말을 걸게 된다.
+ * 매일 하는 동작 앞에 시스템 대화상자를 세우지 않는 편이기도 하다.
  */
 function toggleDay(k) {
   if (parseKey(k) > today()) return;
-  const now = new Date().toISOString();
-  const i = state.attendance.indexOf(k);
-  if (i >= 0) {
-    state.attendance.splice(i, 1);
-    delete state.checked[k];
-    state.removed[k] = now;
-    toast(fmtShort(k) + " 출석 취소");
+  /*
+   * 저장이 실패하면 그 안내가 이미 떠 있다. 그 위에 「완료」를 덮으면
+   * 저장되지도 않은 출석을 성공했다고 알리는 셈이 된다.
+   */
+  if (state.attendance.includes(k)) {
+    if (!uncheckDay(k)) return;
+    toast(fmtShort(k) + " 출석 취소",
+          { label: "되돌리기", run: () => { if (checkDay(k)) toast("되돌렸습니다"); } });
   } else {
-    state.attendance.push(k);
-    state.attendance.sort();
-    delete state.removed[k];
-    state.checked[k] = now;          // 이 날짜를 켠 시각 — 병합에서 취소 시각과 겨룬다
+    if (!checkDay(k)) return;
     toast(fmtShort(k) + " 출석 완료 💪");
   }
-  save();
-  render();
 }
 
 function fmtShort(k) {
@@ -1483,13 +1522,41 @@ function scheduleMidnight() {
   midnightTimer = setTimeout(() => { render(); scheduleMidnight(); }, next - n);
 }
 
+/*
+ * 안내 한 줄. 되돌릴 수 있는 동작이면 버튼을 함께 띄운다.
+ *
+ * 버튼이 붙으면 표시 시간을 늘린다 — 1.8초는 읽고 판단해 누르기엔 짧다.
+ * 그래도 놓칠 수 있으므로 **토스트가 유일한 되돌리기 수단이면 안 된다.**
+ * 출석은 그 칸을 다시 누르면 언제든 돌아오므로 이 버튼은 지름길일 뿐이다
+ * (스크린리더처럼 사라지는 버튼에 닿기 어려운 경우도 그 경로로 커버된다).
+ */
+const TOAST_MS = 1800;
+const TOAST_ACTION_MS = 6000;
+
 let toastTimer = null;
-function toast(msg) {
-  const el = $("toast");
-  el.textContent = msg;
-  el.classList.add("show");
+let toastAction = null;
+
+function toast(msg, action) {
+  $("toastMsg").textContent = msg;
+  const btn = $("toastAction");
+  toastAction = action || null;
+  btn.hidden = !action;
+  if (action) btn.textContent = action.label;
+  $("toast").classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
+  toastTimer = setTimeout(hideToast, action ? TOAST_ACTION_MS : TOAST_MS);
+}
+
+function hideToast() {
+  $("toast").classList.remove("show");
+  $("toastAction").hidden = true;
+  toastAction = null;
+}
+
+function runToastAction() {
+  const a = toastAction;
+  hideToast();                 // 두 번 눌러 두 번 실행되는 일을 막는다
+  if (a) a.run();
 }
 
 /* ============================================================

@@ -16,8 +16,8 @@ GitHub Pages 에 함께 올라가도 영향이 없다.
 
 ```bash
 node --test "test/*.test.mjs"     # 순수 함수 74종 — 브라우저·의존성 없음
-python3 dev/smoke.py              # 브라우저 45종 (제스처·히스토리·포커스·오프라인·손상 복구)
-python3 dev/smoke.py --file       # file:// 로도 도는지까지 (90종)
+python3 dev/smoke.py              # 브라우저 64종 (탭·롱프레스·되돌리기·히스토리·포커스·오프라인·안전영역·저장 실패)
+python3 dev/smoke.py --file       # file:// 로도 도는지까지 (116종)
 python3 dev/smoke-sync.py         # 동기화 27종 (페이지네이션·동시성·오류·세대)
 ```
 

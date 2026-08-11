@@ -131,19 +131,25 @@ function normalizeNotes(d) {
            epoch: Number.isInteger(d.epoch) && d.epoch >= 0 ? d.epoch : 0 };
 }
 
-/** 메모 쪽 save(). 동기화 타이머는 코어와 공유한다 — syncNow 가 두 문서를 함께 처리한다 */
+/**
+ * 메모 쪽 save(). 동기화 타이머는 코어와 공유한다 — syncNow 가 두 문서를 함께 처리한다.
+ * 코어의 save() 와 같이 **성공 여부를 돌려준다** (부르는 쪽이 「저장」 안내를 덮지 않도록).
+ */
 function saveNotes() {
   noteDoc.updatedAt = new Date().toISOString();
-  writeNotesLocal();
+  const ok = writeNotesLocal();
   scheduleSync();
+  return ok;
 }
 
 function writeNotesLocal() {
   try {
     localStorage.setItem(NOTES_KEY, JSON.stringify(noteDoc));
+    return true;
   } catch (e) {
     // 출석과 문구를 구분한다 — 어느 쪽이 안 저장됐는지 알아야 대처할 수 있다
     toast("메모 저장 실패 — 저장 공간을 확인하세요");
+    return false;
   }
 }
 
@@ -351,10 +357,10 @@ function addTag() {
   noteDoc.tags.push({ id: name, name, at: new Date().toISOString() });
   delete noteDoc.removedTags[name];        // 지웠던 이름을 되살리면 삭제 표시를 지운다
   noteForm.tag = name;                     // 방금 만든 걸 바로 쓰고 싶을 것이다
-  saveNotes();
+  const ok = saveNotes();
   renderNoteForm();
   renderNotes();
-  toast(`「${name}」 분류를 추가했습니다`);
+  if (ok) toast(`「${name}」 분류를 추가했습니다`);
 }
 
 function removeTag(id) {
@@ -379,10 +385,11 @@ function removeTag(id) {
 
   if (noteForm.tag === id) noteForm.tag = moveTo;
   if (noteFilter === id) noteFilter = "all";
-  saveNotes();
+  const ok = saveNotes();
   renderNoteForm();
   render();
-  toast(used.length ? `삭제 · 메모 ${used.length}개를 옮겼습니다` : "분류를 삭제했습니다");
+  // 저장 실패 안내를 덮지 않는다 — 안 저장된 것을 「삭제했습니다」로 알리면 안 된다
+  if (ok) toast(used.length ? `삭제 · 메모 ${used.length}개를 옮겼습니다` : "분류를 삭제했습니다");
 }
 
 const noteDirty = () => $("noteText").value.trim() !== noteForm.orig;
@@ -405,10 +412,10 @@ function saveNote() {
 
   noteDoc.notes[k] = { text, tag: noteForm.tag, at: new Date().toISOString() };
   delete noteDoc.removedNotes[k];             // 다시 쓰면 삭제 표시를 지운다
-  saveNotes();
+  const ok = saveNotes();
   closeNote();
   render();
-  toast(`${fmtShort(k)} 메모 저장`);
+  if (ok) toast(`${fmtShort(k)} 메모 저장`);
 }
 
 function deleteNote() {
@@ -418,10 +425,10 @@ function deleteNote() {
   delete noteDoc.notes[k];
   // 툼스톤이 없으면 다른 기기와 동기화할 때 지운 메모가 되살아난다
   noteDoc.removedNotes[k] = new Date().toISOString();
-  saveNotes();
+  const ok = saveNotes();
   closeNote();
   render();
-  toast("메모를 삭제했습니다");
+  if (ok) toast("메모를 삭제했습니다");
 }
 
 /**
@@ -546,6 +553,17 @@ const allNotesOpen = () => !$("notesPage").hidden;
  * 헤더+점프바(.page-top)가 top:0 에 붙고 머리글은 그 아래여야 하는데, 연도를 펴고 접을 때마다
  * 점프바 높이가 변해 CSS 상수로 못 박을 수 없다.
  */
+/**
+ * `.page-top` 이 실제로 붙어 있는 자리의 **아래 끝** — 월 머리글이 그 아래에 이어 붙어야 한다.
+ *
+ * 자기 높이만 재면 안 된다. 홈 화면 실행에서는 상태바만큼(`top: env(safe-area-inset-top)`)
+ * 내려가 있으므로 그만큼을 더해야 한다. 안전영역이 없는 곳에서는 top 이 0 이라 결과가 같다.
+ */
+function stickOffset() {
+  const el = $("notesTop");
+  return (parseFloat(getComputedStyle(el).top) || 0) + el.getBoundingClientRect().height;
+}
+
 let stickRaf = 0;
 function syncStickyOffset() {
   /*
@@ -555,8 +573,8 @@ function syncStickyOffset() {
   if (stickRaf) return;
   stickRaf = requestAnimationFrame(() => {
     stickRaf = 0;
-    const h = $("notesTop").getBoundingClientRect().height;
-    document.documentElement.style.setProperty("--notes-stick", Math.round(h) + "px");
+    const stick = stickOffset();
+    document.documentElement.style.setProperty("--notes-stick", Math.round(stick) + "px");
 
     /*
      * 마지막 그룹도 맨 위까지 올라올 수 있어야 한다. 아래에 남은 내용이 없으면 스크롤이
@@ -567,7 +585,7 @@ function syncStickyOffset() {
     const last = list.lastElementChild;
     list.style.paddingBottom = "0px";
     if (last && last.classList.contains("note-group")) {
-      const need = window.innerHeight - h - last.getBoundingClientRect().height;
+      const need = window.innerHeight - stick - last.getBoundingClientRect().height;
       if (need > 0) list.style.paddingBottom = Math.ceil(need) + "px";
     }
   });
@@ -586,8 +604,8 @@ function syncStickyOffset() {
 function jumpTo(ym) {
   const g = $("noteList").querySelector(`.note-group[data-ym="${ym}"]`);
   if (!g) return;
-  const off = $("notesTop").getBoundingClientRect().height;
-  window.scrollTo(0, window.scrollY + g.getBoundingClientRect().top - off);
+  // 머리글이 붙을 자리(= 고정 바의 아래 끝)와 같은 값을 써야 한 줄도 어긋나지 않는다
+  window.scrollTo(0, window.scrollY + g.getBoundingClientRect().top - stickOffset());
   flashHead(g.querySelector(".note-mhead"));
 }
 

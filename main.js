@@ -11,6 +11,8 @@
    이벤트 바인딩
    ============================================================ */
 
+$("toastAction").onclick = runToastAction;
+
 $("btnShare").onclick = () => openShare("summary");
 $("btnShareSend").onclick = sendShare;
 $("btnShareSave").onclick = () => { saveShare(); toast("이미지를 저장했습니다"); };
