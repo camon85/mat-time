@@ -10,19 +10,27 @@ GitHub Pages 에 함께 올라가도 영향이 없다.
 | [`gen-icons.py`](gen-icons.py) | 홈 화면·파비콘 아이콘을 `icons/` 에 다시 만든다 |
 | [`shots.py`](shots.py) | README 용 스크린샷을 `docs/images/` 에 다시 만든다 |
 | [`smoke.py`](smoke.py) | 브라우저에서만 확인되는 동작을 실제로 눌러 본다 |
+| [`smoke-sync.py`](smoke-sync.py) | 가짜 GitHub 로 동기화의 오류·경계 응답을 재현한다 |
 
 ## 검증
 
 ```bash
-node --test "test/*.test.mjs"     # 순수 함수 42종 — 브라우저·의존성 없음
-python3 dev/smoke.py              # 브라우저 27종 (제스처·히스토리·포커스·오프라인)
-python3 dev/smoke.py --file       # file:// 로도 도는지까지
+node --test "test/*.test.mjs"     # 순수 함수 74종 — 브라우저·의존성 없음
+python3 dev/smoke.py              # 브라우저 45종 (제스처·히스토리·포커스·오프라인·손상 복구)
+python3 dev/smoke.py --file       # file:// 로도 도는지까지 (90종)
+python3 dev/smoke-sync.py         # 동기화 27종 (페이지네이션·동시성·오류·세대)
 ```
 
 나누는 기준은 **「브라우저가 정말 필요한가」** 다. 병합·검증·날짜 계산은 `node:vm` 으로
 충분하고, 롱프레스 후 click 억제 · 뒤로가기 깊이 · 포커스 복귀 · 서비스 워커는
 흉내낼 수 없어 진짜 브라우저로 눌러 본다. 자세한 이유는
 [`../docs/decisions/DR-003`](../docs/decisions/DR-003-test-strategy.md).
+
+동기화만 따로 뺀 이유는 **가짜 GitHub 서버**가 필요하기 때문이다. 실제 토큰 없이
+401/403/404/네트워크 끊김·1MB 초과 응답·gist 1,000개 계정을 재현한다.
+
+> **셀렉터 주의** — 달력과 날짜 선택기가 `.cal-grid` 를 함께 쓴다. 선택기를 한 번 연 뒤로는
+> 숨겨진 선택기 칸이 먼저 잡히므로 달력을 가리킬 땐 반드시 `#calGrid` 로 좁힌다.
 
 ## 쓰는 법
 

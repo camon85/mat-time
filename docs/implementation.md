@@ -694,9 +694,9 @@ README.md                사용자 가이드
 ### 검증
 
 ```bash
-node --test "test/*.test.mjs"     # 순수 함수 42종 — 의존성 없음, 1초 이내
-python3 dev/smoke.py              # 브라우저 27종 (제스처·히스토리·포커스·오프라인)
-python3 dev/smoke.py --file       # file:// 로도 도는지까지
+node --test "test/*.test.mjs"     # 순수 함수 74종 — 의존성 없음, 1초 이내
+python3 dev/smoke.py --file       # 브라우저 90종 (제스처·히스토리·포커스·오프라인·손상 복구)
+python3 dev/smoke-sync.py         # 동기화 27종 — 가짜 GitHub 로 오류·경계 응답 재현
 ```
 
 **나누는 기준은 「브라우저가 필요한가」다.** 병합·검증·날짜 계산은 순수 함수라 `node:vm` 에

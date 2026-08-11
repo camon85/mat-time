@@ -98,7 +98,7 @@ function normalizeNotes(d) {
     for (const t of d.tags) {
       if (!t || typeof t !== "object") continue;
       const id = typeof t.id === "string" ? t.id.trim() : "";
-      const name = (typeof t.name === "string" ? t.name : "").trim().slice(0, TAG_NAME_MAX);
+      const name = clip((typeof t.name === "string" ? t.name : "").trim(), TAG_NAME_MAX);
       if (!okTagId(id) || !name || seen.has(id) || removedTags[id]) continue;
       seen.add(id);
       // at 은 "이 분류를 만든 시각" — 없으면 문서 시각으로 확정한다.
@@ -116,7 +116,7 @@ function normalizeNotes(d) {
     for (const [k, v] of Object.entries(src)) {
       if (!DATE_RE.test(k) || removedNotes[k]) continue;   // 취소가 이긴다 (출석·이력과 동일)
       if (!v || typeof v !== "object" || Array.isArray(v)) continue;
-      const text = (typeof v.text === "string" ? v.text : "").trim().slice(0, NOTE_MAX);
+      const text = clip((typeof v.text === "string" ? v.text : "").trim(), NOTE_MAX);
       if (!text) continue;                                 // 빈 메모는 메모가 아니다
       notes[k] = {
         text,
@@ -399,7 +399,7 @@ function changeNoteDate(next) {
 
 function saveNote() {
   const k = noteForm.date;
-  const text = $("noteText").value.trim().slice(0, NOTE_MAX);
+  const text = clip($("noteText").value.trim(), NOTE_MAX);
   if (!DATE_RE.test(k)) { toast("날짜를 선택하세요"); return; }
   if (!text) { toast("내용을 입력하세요"); return; }
 

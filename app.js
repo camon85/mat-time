@@ -169,14 +169,30 @@ function stashCorrupt(storeKey, raw) {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/*
+ * 사전(dictionary)으로 쓰는 객체는 **프로토타입 없이** 만든다.
+ *
+ * 분류 id 는 사용자가 정하는 문자열이라 `toString` · `valueOf` · `__proto__` 가 될 수 있다
+ * (전부 10자 이하다). 평범한 `{}` 를 사전으로 쓰면 그런 키에서 세 가지가 한꺼번에 깨진다.
+ *
+ *   - `map["toString"]` 이 Object.prototype 의 함수를 돌려줘 **없는 툼스톤이 있는 것처럼** 보인다
+ *     → 지운 적 없는 분류가 조용히 사라진다
+ *   - `map["__proto__"] = "..."` 은 setter 라 **조용히 무시**된다 → 툼스톤이 저장되지 않는다
+ *   - `"toString" in map` 이 항상 참이라 복원 검증이 멀쩡한 파일을 거부한다
+ *
+ * 날짜 키에는 해당이 없지만, 사전은 전부 같은 규칙으로 만들어 두는 편이 안전하다.
+ */
+const dict = () => Object.create(null);
+
 /**
- * { 키: ISO 시각 } 꼴만 걸러 낸다 (removed · removedHistory · removedNotes · removedTags 공용).
+ * { 키: ISO 시각 } 꼴만 걸러 낸다 (checked · removed · removedHistory · removedNotes · removedTags 공용).
  * 키 검사는 기본이 날짜이고, 분류 툼스톤처럼 날짜가 아닌 키는 okKey 로 바꿔 준다.
  */
 function stampMap(src, okKey) {
   const ok = okKey || (k => DATE_RE.test(k));
-  const o = {};
+  const o = dict();
   if (src && typeof src === "object" && !Array.isArray(src)) {
+    // Object.entries 는 자기 속성만 본다. JSON.parse 는 "__proto__" 도 자기 속성으로 만든다
     for (const [k, v] of Object.entries(src)) {
       if (ok(k) && typeof v === "string" && v) o[k] = v;
     }
@@ -192,7 +208,22 @@ function stampMap(src, okKey) {
  */
 const withAt = (obj, at) => (at ? { ...obj, at } : obj);
 
+/**
+ * 길이 상한으로 자르되 **글자를 쪼개지 않는다.**
+ *
+ * 상한은 UTF-16 코드 유닛 기준이다 (textarea 의 maxlength 와 같은 단위여야 화면의 「N / 500」이
+ * 맞는다). 그런데 이모지는 두 유닛이라, 경계가 그 사이에 떨어지면 반쪽만 남아 `�` 로 보인다.
+ * 마지막이 서러게이트 상반이면 한 칸 앞에서 끊는다.
+ */
+function clip(s, max) {
+  if (s.length <= max) return s;
+  const c = s.charCodeAt(max - 1);
+  return s.slice(0, (c >= 0xd800 && c <= 0xdbff) ? max - 1 : max);
+}
+
 function normalize(d) {
+  // normalizeNotes 와 같은 방어 — 최소 문서는 {} 이고, 그것도 아니면 {} 로 본다
+  if (!d || typeof d !== "object" || Array.isArray(d)) d = {};
   const updatedAt = typeof d.updatedAt === "string" ? d.updatedAt : "";
   const att = Array.isArray(d.attendance)
     ? [...new Set(d.attendance.filter(s => typeof s === "string" && DATE_RE.test(s)))].sort()
@@ -222,7 +253,7 @@ function normalize(d) {
    * 옛 문서에는 값이 없으므로 문서 시각으로 한 번만 확정하고, 이후 토글은 자기 시각을 갖는다.
    */
   const chk = stampMap(d.checked);
-  const checked = {};
+  const checked = dict();
   for (const k of attendance) {
     const at = chk[k] || updatedAt;
     if (at) checked[k] = at;           // 빈 시각은 넣지 않는다 (withAt 주석 참조)
@@ -1233,7 +1264,12 @@ function validateBackup(d) {
                    || badStampMap(remTags, "removedTags", okTagId);
   if (stampErr) return stampErr;
 
-  const dupT = [...tagIds].find(id => id in remTags);
+  /*
+   * `in` 이 아니라 자기 속성만 본다. 여기 들어오는 객체는 JSON.parse 직후라 프로토타입이
+   * 붙어 있고, 분류 id 는 사용자가 정한다 — `"toString" in {}` 은 늘 참이므로 `in` 을 쓰면
+   * 「toString」이라는 분류가 든 멀쩡한 백업을 「양쪽에 있다」며 거부한다.
+   */
+  const dupT = [...tagIds].find(id => Object.hasOwn(remTags, id));
   if (dupT) return `"${dupT}" 가 tags 와 removedTags 양쪽에 있습니다.`;
 
   // checked 는 attendance 의 부분집합이어야 한다 — 아니면 normalize 가 조용히 버린다
@@ -1241,11 +1277,11 @@ function validateBackup(d) {
   const orphan = Object.keys(chk).find(k => !attSet.has(k));
   if (orphan) return `checked["${orphan}"] 에 해당하는 출석이 attendance 에 없습니다.`;
 
-  const dupA = att.find(k => k in rem);
+  const dupA = att.find(k => Object.hasOwn(rem, k));
   if (dupA) return `${dupA} 이 attendance 와 removed 양쪽에 있습니다.`;
-  const dupH = hDates.find(k => k in remHist);
+  const dupH = hDates.find(k => Object.hasOwn(remHist, k));
   if (dupH) return `${dupH} 이 history 와 removedHistory 양쪽에 있습니다.`;
-  const dupN = Object.keys(notes).find(k => k in remNotes);
+  const dupN = Object.keys(notes).find(k => Object.hasOwn(remNotes, k));
   if (dupN) return `${dupN} 이 notes 와 removedNotes 양쪽에 있습니다.`;
 
   return null;
@@ -1348,7 +1384,8 @@ function toggleHistForm(open) {
 function pickByStamp(a, b, keysOf, tombOf, atOf) {
   const sa = new Set(keysOf(a)), sb = new Set(keysOf(b));
   const ta = tombOf(a), tb = tombOf(b);
-  const kept = [], tombs = {}, stamps = {};
+  // 분류 id 가 키로 들어오므로 반드시 프로토타입 없는 사전이어야 한다 (dict 주석 참조)
+  const kept = [], tombs = dict(), stamps = dict();
   for (const d of new Set([...sa, ...sb, ...Object.keys(ta), ...Object.keys(tb)])) {
     const sideOf = (s, set, t) =>
       t[d] ? { on: false, at: t[d] }

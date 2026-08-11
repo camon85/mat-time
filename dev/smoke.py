@@ -20,7 +20,9 @@ import threading
 from playwright.sync_api import sync_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TODAY_CELL = ".cal-grid .day.today"
+# 달력과 날짜 선택기가 .cal-grid 를 함께 쓴다. 선택기를 한 번 연 뒤로는 숨겨진 선택기 칸이
+# 먼저 잡혀 "보이지 않는 요소" 로 실패하므로, 반드시 #calGrid 로 좁혀야 한다
+TODAY_CELL = "#calGrid .day.today"
 
 results = []
 
@@ -113,7 +115,7 @@ def run(url, label):
         check("기본값: 승급 진행도 카드가 없다", not page.is_visible("#goalCard"))
         check("기본값: 로드맵 카드가 없다", not page.is_visible("#roadCard"))
         check("기본값: 달력에 승급식 표시가 없다",
-              page.eval_on_selector_all(".cal-grid .day.ceremony", "els => els.length === 0")
+              page.eval_on_selector_all("#calGrid .day.ceremony", "els => els.length === 0")
               and not page.is_visible("#legCeremony"))
         check("기본값: 토글이 꺼져 있다", not page.is_checked("#setTrack"))
 
@@ -133,7 +135,7 @@ def run(url, label):
         check("켜면 승급 진행도 카드가 나타난다", page.is_visible("#goalCard"))
         check("켜면 로드맵이 나타난다", page.is_visible("#roadCard"))
         check("켜면 달력에 승급식이 표시된다",
-              page.eval_on_selector_all(".cal-grid .day.ceremony", "els => els.length >= 1")
+              page.eval_on_selector_all("#calGrid .day.ceremony", "els => els.length >= 1")
               and page.is_visible("#legCeremony"))
 
         page.click(".toggle .switch")
@@ -227,7 +229,56 @@ def run(url, label):
         })""")
         check("항목별 시각이 없는 옛 백업도 받아들인다", legacy is None, str(legacy))
 
+        # --- 연타: 토글이 짝이 맞고 유령 도장이 남지 않아야 한다
+        # 앞의 잔디 점프로 달력이 다른 달에 가 있다. 오늘 칸을 쓰려면 이번 달로 돌아온다
+        page.evaluate("goToMonth(key(today()))")
+        page.wait_for_timeout(100)
+        for _ in range(6):
+            page.click(TODAY_CELL)
+        st = page.evaluate("() => ({on: state.attendance.length, chk: Object.keys(state.checked).length})")
+        check("짝수 번 탭하면 켠 시각도 함께 지워진다", st["chk"] == st["on"], str(st))
+
+        # --- 저장 공간이 꽉 찼을 때: 죽지 말고 알려야 한다
+        quota = page.evaluate("""() => {
+          const real = localStorage.setItem.bind(localStorage);
+          localStorage.setItem = () => { const e = new Error('quota'); e.name = 'QuotaExceededError'; throw e; };
+          let threw = false;
+          try { toggleDay(key(addDays(today(), -3))); } catch (e) { threw = true; }
+          localStorage.setItem = real;
+          return { threw, toast: $('toast').textContent };
+        }""")
+        check("저장 실패가 앱을 죽이지 않는다", not quota["threw"], str(quota))
+        check("저장 실패를 사용자에게 알린다", "저장" in quota["toast"], quota["toast"])
+
         check("전 과정에서 콘솔 오류가 없다", not errors, "; ".join(errors[:3]))
+        browser.close()
+
+
+def check_corrupt(url):
+    """읽지 못한 데이터를 덮어쓰지 않고 옆으로 옮기는지 — 새로 부팅해야 확인된다."""
+    print("\n=== 손상된 저장소 ===")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(url)
+        page.evaluate("""() => {
+          localStorage.setItem('bjj-attendance', '{깨진 JSON');
+          localStorage.setItem('bjj-notes', '{이것도');
+        }""")
+        page.add_init_script("window.alert = m => { window.__alerted = m; };")
+        page.goto(url)
+        page.wait_for_selector(TODAY_CELL)
+        page.wait_for_timeout(600)
+        r = page.evaluate("""() => ({
+          core: localStorage['bjj-attendance-corrupt'],
+          notes: localStorage['bjj-notes-corrupt'],
+          alerted: window.__alerted || ''
+        })""")
+        check("손상된 출석 원본이 보존된다", r["core"] is not None and "깨진" in r["core"])
+        check("손상된 메모 원본도 보존된다", r["notes"] is not None)
+        check("사용자에게 알린다", "읽지 못했습니다" in r["alerted"], r["alerted"][:60])
+        check("그래도 정상 부팅한다",
+              page.eval_on_selector_all("#calGrid .day", "els => els.length === 42"))
         browser.close()
 
 
@@ -253,7 +304,7 @@ def check_offline(url):
         check("네트워크가 끊겨도 앱이 열린다", ok)
         if ok:
             check("오프라인에서도 달력이 그려진다",
-                  page.eval_on_selector_all(".cal-grid .day", "els => els.length === 42"))
+                  page.eval_on_selector_all("#calGrid .day", "els => els.length === 42"))
         ctx.set_offline(False)
         browser.close()
 
@@ -267,6 +318,7 @@ def main():
     try:
         run(url, "http (서비스 워커 등록됨)")
         check_offline(url)
+        check_corrupt(url)
         if args.file:
             run((ROOT / "index.html").as_uri(), "file://")
     finally:
